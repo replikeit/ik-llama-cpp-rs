@@ -7,8 +7,54 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/replikeit/ik-llama-cpp-rs"
 links = "ik_llama"
 
-# NOTE: `include` (cargo publish packaging) is adapted for the ik source tree in
-# a later task; for local/submodule builds it is ignored.
+# `cargo publish` packaging: bundle ONLY the vendored ik_llama.cpp source the
+# build actually compiles (the submodule's full tree is ~114 MB — models, docs,
+# tests, most examples, github-data are excluded). The CMake build runs with
+# LLAMA_BUILD_TESTS/EXAMPLES/SERVER=OFF, so those subtrees are not needed;
+# examples/mtmd is compiled separately by cc for the `mtmd` feature, and
+# vendor/cpp-httplib is an unconditional add_subdirectory.
+include = [
+    "build.rs",
+    "wrapper.h",
+    "wrapper_common.h",
+    "wrapper_common.cpp",
+    "wrapper_grammar.h",
+    "wrapper_grammar.cpp",
+    "wrapper_mtmd.h",
+    "wrapper_utils.h",
+    "/src",
+
+    "/ik_llama.cpp/CMakeLists.txt",
+    "/ik_llama.cpp/cmake/**/*",
+    "/ik_llama.cpp/convert_hf_to_gguf.py",
+    # CMake helper scripts + configure_file templates referenced during the build
+    # (build-info generation, *.pc.in, llama-config.cmake.in, FindSIMD, ...).
+    "/ik_llama.cpp/**/*.cmake",
+    "/ik_llama.cpp/**/*.in",
+
+    "/ik_llama.cpp/include/*.h",
+
+    "/ik_llama.cpp/ggml/CMakeLists.txt",
+    "/ik_llama.cpp/ggml/cmake/**/*",
+    "/ik_llama.cpp/ggml/include/*.h",
+    "/ik_llama.cpp/ggml/src/**/*",
+
+    "/ik_llama.cpp/src/CMakeLists.txt",
+    "/ik_llama.cpp/src/**/*.h",
+    "/ik_llama.cpp/src/**/*.hpp",
+    "/ik_llama.cpp/src/**/*.c",
+    "/ik_llama.cpp/src/**/*.cpp",
+
+    "/ik_llama.cpp/common/CMakeLists.txt",
+    "/ik_llama.cpp/common/**/*.h",
+    "/ik_llama.cpp/common/**/*.hpp",
+    "/ik_llama.cpp/common/**/*.cpp",
+    "/ik_llama.cpp/common/*.in",
+
+    "/ik_llama.cpp/vendor/**/*",
+
+    "/ik_llama.cpp/examples/mtmd/**/*",
+]
 
 [dependencies]
 
