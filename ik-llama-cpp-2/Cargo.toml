@@ -1,13 +1,13 @@
 [package]
 name = "ik-llama-cpp-2"
 description = "ik_llama.cpp bindings for Rust (SOTA quants + MTP)"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/replikeit/ik-llama-cpp-rs"
 
 [dependencies]
-ik-llama-cpp-sys = { path = "../ik-llama-cpp-sys", version = "0.1.0" }
+ik-llama-cpp-sys = { path = "../ik-llama-cpp-sys", version = "0.1.1" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 encoding_rs = "0.8"
