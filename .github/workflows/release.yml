@@ -1,13 +1,11 @@
 name: Release (crates.io)
 
-# Scaffold for publishing to crates.io on a GitHub Release.
+# Publish to crates.io on a GitHub Release (or manual dispatch).
 #
-# NOT yet functional: the `ik-llama-cpp-sys` crate vendors ik_llama.cpp as a git
-# submodule, whose files are NOT included in a `cargo publish` tarball by
-# default, and the full source (>100 MB) exceeds crates.io's 10 MB limit. Before
-# this can publish, `ik-llama-cpp-sys/Cargo.toml` needs an `include = [...]`
-# listing only the exact source files the build compiles (mirroring
-# `llama-cpp-sys-2`), plus possibly a crates.io size-limit increase. Requires a
+# The sys crate's `include` list bundles only the source the build compiles
+# (~3.4 MB compressed, under crates.io's 10 MB limit). `--no-verify` is required:
+# ik's CMake generates common/build-info.cpp in-tree, which trips cargo's
+# publish-time source-unchanged check (harmless for consumers). Requires a
 # `CARGO_REGISTRY_TOKEN` repo secret.
 
 on:
@@ -34,6 +32,6 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p ik-llama-cpp-sys
-          sleep 30   # let crates.io index the sys crate before the dependent
-          cargo publish -p ik-llama-cpp-2
+          cargo publish -p ik-llama-cpp-sys --no-verify
+          sleep 45   # let crates.io index the sys crate before the dependent
+          cargo publish -p ik-llama-cpp-2 --no-verify
