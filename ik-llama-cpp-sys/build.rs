@@ -140,6 +140,7 @@ fn main() {
         &out_dir,
         want_cuda,
         want_vulkan,
+        want_metal,
         want_openmp,
         want_common,
         &backend,
@@ -534,6 +535,14 @@ fn link_metal() {
 }
 
 fn link_system(static_stdcxx: bool, want_openmp: bool) {
+    // macOS: the C++ stdlib is libc++ (libstdc++ was removed), and m/pthread/dl
+    // all live in libSystem (already linked), so `-lstdc++`/`-ldl`/`-lgomp` would
+    // fail. OpenMP on macOS is libomp, not gomp — not wired here.
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-lib=dylib=c++");
+        return;
+    }
+    // GNU/Linux (and other GNU targets).
     if static_stdcxx {
         println!("cargo:rustc-link-lib=static=stdc++");
     } else {
@@ -547,11 +556,13 @@ fn link_system(static_stdcxx: bool, want_openmp: bool) {
     println!("cargo:rustc-link-lib=dylib=dl");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_manifest(
     src: &Path,
     out_dir: &Path,
     cuda: bool,
     vulkan: bool,
+    metal: bool,
     openmp: bool,
     common: bool,
     backend: &str,
@@ -570,6 +581,9 @@ fn write_manifest(
     }
     if vulkan {
         backends.push("vulkan");
+    }
+    if metal {
+        backends.push("metal");
     }
     if openmp {
         backends.push("openmp");
