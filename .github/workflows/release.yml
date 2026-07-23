@@ -1,0 +1,39 @@
+name: Release (crates.io)
+
+# Scaffold for publishing to crates.io on a GitHub Release.
+#
+# NOT yet functional: the `ik-llama-cpp-sys` crate vendors ik_llama.cpp as a git
+# submodule, whose files are NOT included in a `cargo publish` tarball by
+# default, and the full source (>100 MB) exceeds crates.io's 10 MB limit. Before
+# this can publish, `ik-llama-cpp-sys/Cargo.toml` needs an `include = [...]`
+# listing only the exact source files the build compiles (mirroring
+# `llama-cpp-sys-2`), plus possibly a crates.io size-limit increase. Requires a
+# `CARGO_REGISTRY_TOKEN` repo secret.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config git
+      - name: Publish (sys first, then the safe wrapper)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish -p ik-llama-cpp-sys
+          sleep 30   # let crates.io index the sys crate before the dependent
+          cargo publish -p ik-llama-cpp-2

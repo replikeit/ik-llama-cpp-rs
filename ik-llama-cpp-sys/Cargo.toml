@@ -1,0 +1,42 @@
+[package]
+name = "ik-llama-cpp-sys"
+description = "Low level bindings to ik_llama.cpp (ikawrakow's SOTA-quant fork)"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/replikeit/ik-llama-cpp-rs"
+links = "ik_llama"
+
+# NOTE: `include` (cargo publish packaging) is adapted for the ik source tree in
+# a later task; for local/submodule builds it is ignored.
+
+[dependencies]
+
+[build-dependencies]
+bindgen = { workspace = true }
+cc = { workspace = true, features = ["parallel"] }
+cmake = { workspace = true }
+walkdir = { workspace = true }
+
+[features]
+# v1 default: CPU core, no `common`/MTP. `common` is opt-in (needed for MTP).
+default = []
+# Build ik_llama.cpp's `common/` static library + the wrapper_common.cpp glue
+# (JSON-schema-to-grammar + MTP speculative). Required for the MtpSpeculative API.
+common = []
+# Build ik_llama.cpp's `examples/mtmd/` multimodal library (libmtmd: mtmd.cpp,
+# mtmd-audio.cpp, clip.cpp, mtmd-helper.cpp) + a dedicated C++-mode bindgen pass
+# emitting the `mtmd_*` bindings. Independent of `common`.
+mtmd = []
+cuda = []
+cuda-no-vmm = ["cuda"]
+vulkan = []
+openmp = []
+static-openmp = ["openmp"]
+static-stdcxx = []
+shared-stdcxx = []
+dynamic-link = []
+# Build with GGML_NATIVE=ON (host-CPU tuning). Off by default for portable artifacts.
+native = []
+# NOTE: there is no `system-ggml` feature — ik has no LLAMA_USE_SYSTEM_GGML / ggml-config.cmake.
+# Linking a prebuilt ik is done via the `IK_LLAMA_CPP_LIB_DIR` env contract in build.rs.

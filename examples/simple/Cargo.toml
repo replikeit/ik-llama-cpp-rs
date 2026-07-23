@@ -1,0 +1,15 @@
+[package]
+name = "simple"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ik-llama-cpp-2 = { path = "../../ik-llama-cpp-2" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+common = ["ik-llama-cpp-2/common"]
+cuda = ["ik-llama-cpp-2/cuda"]

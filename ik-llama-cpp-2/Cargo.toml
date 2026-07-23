@@ -1,0 +1,38 @@
+[package]
+name = "ik-llama-cpp-2"
+description = "ik_llama.cpp bindings for Rust (SOTA quants + MTP)"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/replikeit/ik-llama-cpp-rs"
+
+[dependencies]
+ik-llama-cpp-sys = { path = "../ik-llama-cpp-sys", version = "0.1.0" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+encoding_rs = "0.8"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+encoding_rs = "0.8"
+
+[features]
+# v1 default: CPU core (general path). `common` is opt-in (MTP).
+default = []
+common = ["ik-llama-cpp-sys/common"]
+# Multimodal (vision/audio) support via ik's libmtmd. Experimental API.
+mtmd = ["ik-llama-cpp-sys/mtmd"]
+cuda = ["ik-llama-cpp-sys/cuda"]
+cuda-no-vmm = ["cuda", "ik-llama-cpp-sys/cuda-no-vmm"]
+vulkan = ["ik-llama-cpp-sys/vulkan"]
+openmp = ["ik-llama-cpp-sys/openmp"]
+static-openmp = ["ik-llama-cpp-sys/static-openmp"]
+static-stdcxx = ["ik-llama-cpp-sys/static-stdcxx"]
+shared-stdcxx = ["ik-llama-cpp-sys/shared-stdcxx"]
+dynamic-link = ["ik-llama-cpp-sys/dynamic-link"]
+native = ["ik-llama-cpp-sys/native"]
+# Enables model-backed integration tests gated behind IK_TEST_MODEL env.
+_smoke = []
+
+[lints]
+workspace = true

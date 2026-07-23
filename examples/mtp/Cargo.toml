@@ -1,0 +1,15 @@
+[package]
+name = "mtp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# `common` on by default: the MTP driver (MtpSpeculative) requires it.
+ik-llama-cpp-2 = { path = "../../ik-llama-cpp-2", features = ["common"] }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+cuda = ["ik-llama-cpp-2/cuda"]

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  check:
+    name: build + test (ubuntu, CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install build deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config git
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Fmt
+        run: cargo fmt --all --check
+      - name: Clippy (default)
+        run: cargo clippy -p ik-llama-cpp-2 --all-targets
+      - name: Clippy (common)
+        run: cargo clippy -p ik-llama-cpp-2 --features common --all-targets
+      - name: Build (common)
+        run: cargo build -p ik-llama-cpp-2 --features common
+      # Unit tests only. The model-backed integration tests are behind `_smoke`
+      # + IK_TEST_MODEL and are not run in CI (no GGUF fixture); compile-check
+      # them so they can't rot.
+      - name: Test (unit)
+        run: cargo test -p ik-llama-cpp-2
+      - name: Compile-check smoke tests
+        run: cargo test -p ik-llama-cpp-2 --features common,_smoke --no-run
