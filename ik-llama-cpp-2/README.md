@@ -32,7 +32,7 @@ ik-llama-cpp-2 = "0.1"
 
 ### Features
 
-`cuda`, `vulkan`, `openmp`, `native` (host-CPU tuning), `common` (ik `common/` — enables the MTP
+`cuda`, `vulkan`, `metal` (Apple/macOS), `openmp`, `native` (host-CPU tuning), `common` (ik `common/` — enables the MTP
 speculative driver + `json_schema_to_grammar`), `mtmd` (multimodal). Default = CPU core.
 
 ## Example

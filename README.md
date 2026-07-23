@@ -34,9 +34,11 @@ CUDACXX=/opt/cuda/bin/nvcc CUDAARCHS=89 PATH=/opt/cuda/bin:$PATH \
   cargo build -p ik-llama-cpp-2 --features cuda  # CUDA (NCCL disabled; single-GPU)
 ```
 
-### Features
-`cuda`, `vulkan`, `openmp`, `native` (host-CPU tuning), `static-stdcxx`, `dynamic-link`,
-`common` (builds ik `common/` + the MTP glue scaffold). Default = CPU core.
+### Features / backends
+Drivers: `cuda`, `vulkan`, `metal` (Apple/macOS; no-op off-macOS), CPU (default). Plus `openmp`,
+`native` (host-CPU tuning), `static-stdcxx`, `dynamic-link`, and `common` (builds ik `common/` + the
+MTP glue). Prebuilt sharing (ik's equivalent of a "system ggml") is the `IK_LLAMA_CPP_LIB_DIR` link
+path — ik has no `LLAMA_USE_SYSTEM_GGML` since its ggml carries the SOTA-quant kernels.
 
 > **`GGML_MAX_CONTEXTS=2048`** is set for all CMake builds: ik allocates one `ggml_context` per GGUF
 > shard, so loading a split set of >64 shards fails at shard 65 with the default cap of 64. (Only

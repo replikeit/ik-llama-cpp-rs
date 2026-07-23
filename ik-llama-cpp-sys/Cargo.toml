@@ -1,7 +1,7 @@
 [package]
 name = "ik-llama-cpp-sys"
 description = "Low level bindings to ik_llama.cpp (ikawrakow's SOTA-quant fork)"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/replikeit/ik-llama-cpp-rs"
@@ -84,6 +84,8 @@ mtmd = []
 cuda = []
 cuda-no-vmm = ["cuda"]
 vulkan = []
+# Apple Metal backend (macOS/aarch64). No-op on non-macOS targets.
+metal = []
 openmp = []
 static-openmp = ["openmp"]
 static-stdcxx = []

@@ -35,6 +35,7 @@ fn main() {
     let want_mtmd = feat("MTMD");
     let want_cuda = feat("CUDA");
     let want_vulkan = feat("VULKAN");
+    let want_metal = feat("METAL") && cfg!(target_os = "macos");
     let want_openmp = feat("OPENMP");
     let want_native = feat("NATIVE");
     let dynamic_link = feat("DYNAMIC_LINK");
@@ -107,6 +108,7 @@ fn main() {
             want_common,
             want_cuda,
             want_vulkan,
+            want_metal,
             want_openmp,
             want_native,
             dynamic_link,
@@ -118,6 +120,16 @@ fn main() {
     // ---- CUDA runtime libs ----
     if want_cuda {
         link_cuda();
+    }
+
+    // ---- Vulkan loader ----
+    if want_vulkan {
+        link_vulkan();
+    }
+
+    // ---- Apple Metal frameworks (macOS only; want_metal is already gated) ----
+    if want_metal {
+        link_metal();
     }
 
     // ---- C++ stdlib + system libs ----
@@ -312,11 +324,13 @@ fn link_prebuilt(lib_dir: &Path, want_common: bool, _want_cuda: bool) {
 }
 
 /// CMake build of ik from source. Returns the cmake crate's output dir (install prefix).
+#[allow(clippy::too_many_arguments)]
 fn cmake_build(
     src: &Path,
     _want_common: bool,
     want_cuda: bool,
     want_vulkan: bool,
+    want_metal: bool,
     want_openmp: bool,
     want_native: bool,
     dynamic_link: bool,
@@ -341,6 +355,16 @@ fn cmake_build(
     }
     if want_vulkan {
         cfg.define("GGML_VULKAN", "ON");
+    }
+    // Metal (macOS only — `want_metal` is already `&& cfg!(target_os = "macos")`).
+    // On Apple targets ggml defaults GGML_METAL=ON, so pin it explicitly to the
+    // feature so a non-`metal` macOS build stays CPU-only. Embed the .metal
+    // shader library into the binary to avoid a runtime file-path dependency.
+    if cfg!(target_os = "macos") {
+        cfg.define("GGML_METAL", if want_metal { "ON" } else { "OFF" });
+        if want_metal {
+            cfg.define("GGML_METAL_EMBED_LIBRARY", "ON");
+        }
     }
     cfg.build()
 }
@@ -475,6 +499,38 @@ fn link_cuda() {
     println!("cargo:rustc-link-lib=dylib=cublas");
     // driver API (needed by ggml-cuda common.cuh / device init)
     println!("cargo:rustc-link-lib=dylib=cuda");
+}
+
+/// Link the Vulkan loader (ggml-vulkan calls into it). CMake builds the
+/// `ggml-vulkan` backend, but the final link needs the loader.
+fn link_vulkan() {
+    // Honor a Vulkan SDK install (Windows/macOS SDK layouts, optional on Linux).
+    if let Ok(sdk) = env::var("VULKAN_SDK") {
+        let lib = PathBuf::from(&sdk).join(if cfg!(target_os = "windows") {
+            "Lib"
+        } else {
+            "lib"
+        });
+        if lib.exists() {
+            println!("cargo:rustc-link-search=native={}", lib.display());
+        }
+    }
+    // Loader lib name: `vulkan-1` on Windows, `vulkan` elsewhere (libvulkan.so).
+    if cfg!(target_os = "windows") {
+        println!("cargo:rustc-link-lib=dylib=vulkan-1");
+    } else {
+        println!("cargo:rustc-link-lib=dylib=vulkan");
+    }
+}
+
+/// Link the Apple frameworks ggml/Metal need. Only called on macOS (see
+/// `want_metal`). `Foundation`/`Accelerate` back ggml's CPU + Metal init;
+/// `Metal`/`MetalKit` are the GPU backend.
+fn link_metal() {
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=Metal");
+    println!("cargo:rustc-link-lib=framework=MetalKit");
+    println!("cargo:rustc-link-lib=framework=Accelerate");
 }
 
 fn link_system(static_stdcxx: bool, want_openmp: bool) {

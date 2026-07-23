@@ -1,7 +1,7 @@
 [package]
 name = "ik-llama-cpp-2"
 description = "ik_llama.cpp bindings for Rust (SOTA quants + MTP)"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/replikeit/ik-llama-cpp-rs"
@@ -16,7 +16,7 @@ features = ["common"]
 no-default-features = false
 
 [dependencies]
-ik-llama-cpp-sys = { path = "../ik-llama-cpp-sys", version = "0.1.2" }
+ik-llama-cpp-sys = { path = "../ik-llama-cpp-sys", version = "0.1.3" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 encoding_rs = "0.8"
@@ -34,6 +34,8 @@ mtmd = ["ik-llama-cpp-sys/mtmd"]
 cuda = ["ik-llama-cpp-sys/cuda"]
 cuda-no-vmm = ["cuda", "ik-llama-cpp-sys/cuda-no-vmm"]
 vulkan = ["ik-llama-cpp-sys/vulkan"]
+# Apple Metal backend (macOS/aarch64).
+metal = ["ik-llama-cpp-sys/metal"]
 openmp = ["ik-llama-cpp-sys/openmp"]
 static-openmp = ["ik-llama-cpp-sys/static-openmp"]
 static-stdcxx = ["ik-llama-cpp-sys/static-stdcxx"]
