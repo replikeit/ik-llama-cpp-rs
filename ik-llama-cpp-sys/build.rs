@@ -66,6 +66,16 @@ fn main() {
         generate_mtmd_bindings(&src, &out_dir);
     }
 
+    // ---- docs.rs: stop after bindgen ----
+    // docs.rs builds have no network and tight time/memory limits, and rustdoc
+    // only needs the generated bindings to typecheck — not the compiled native
+    // library (there is no final link for a rlib's docs). The full from-source
+    // CMake build exceeds docs.rs's limits, so on docs.rs we skip the C++ glue,
+    // the CMake build, and all linking.
+    if env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
     // ---- compile the core grammar glue (cc) ALWAYS ----
     // Emitted before the native libs (GNU ld left-to-right): the glue references
     // `llama_grammar_sample_impl`/`accept_impl` in libllama.

@@ -1,11 +1,17 @@
 [package]
 name = "ik-llama-cpp-sys"
 description = "Low level bindings to ik_llama.cpp (ikawrakow's SOTA-quant fork)"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/replikeit/ik-llama-cpp-rs"
+readme = "README.md"
 links = "ik_llama"
+
+# docs.rs builds only bindgen (the build.rs DOCS_RS guard skips the CMake build).
+[package.metadata.docs.rs]
+features = ["common"]
+no-default-features = false
 
 # `cargo publish` packaging: bundle ONLY the vendored ik_llama.cpp source the
 # build actually compiles (the submodule's full tree is ~114 MB — models, docs,
@@ -15,6 +21,7 @@ links = "ik_llama"
 # vendor/cpp-httplib is an unconditional add_subdirectory.
 include = [
     "build.rs",
+    "README.md",
     "wrapper.h",
     "wrapper_common.h",
     "wrapper_common.cpp",
