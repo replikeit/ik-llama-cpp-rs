@@ -245,6 +245,55 @@ impl Stage {
     }
 }
 
+/// Build the single lazy-grammar trigger *pattern* from `trigger_words`,
+/// reproducing byte-for-byte what ik's C++ `llama_sampler_init_grammar_lazy`
+/// assembles internally: `[\s\S]*?(w1|w2|…)[\s\S]*`, with each word's regex
+/// metacharacters backslash-escaped. Returns `None` when there are no words (so
+/// the caller passes no pattern — a token-only lazy trigger), matching the C++
+/// which leaves `trigger_patterns` empty in that case.
+fn build_lazy_trigger_pattern(
+    trigger_words: impl IntoIterator<Item = impl AsRef<[u8]>>,
+) -> Option<Vec<u8>> {
+    let mut words = trigger_words.into_iter();
+    let first = words.next()?;
+    let mut pattern: Vec<u8> = b"[\\s\\S]*?(".to_vec();
+    push_regex_escaped(&mut pattern, first.as_ref());
+    for word in words {
+        pattern.push(b'|');
+        push_regex_escaped(&mut pattern, word.as_ref());
+    }
+    pattern.extend_from_slice(b")[\\s\\S]*");
+    Some(pattern)
+}
+
+/// Append `word` to `out`, backslash-escaping the regex metacharacters ik's C++
+/// escapes (`std::regex special_chars = "[.^$|()*+?\\[\\]{}\\\\]"`). All are
+/// ASCII, so escaping byte-wise matches the C++ (which runs `std::regex_replace`
+/// over the raw bytes) even for multi-byte UTF-8 words.
+fn push_regex_escaped(out: &mut Vec<u8>, word: &[u8]) {
+    for &b in word {
+        if matches!(
+            b,
+            b'.' | b'^'
+                | b'$'
+                | b'|'
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b'?'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b'\\'
+        ) {
+            out.push(b'\\');
+        }
+        out.push(b);
+    }
+}
+
 /// A sampler: an ordered chain of transform stages ending in a selector,
 /// matching `llama-cpp-2`'s `LlamaSampler`.
 ///
@@ -396,23 +445,38 @@ impl LlamaSampler {
     ) -> Result<Self, GrammarInitError> {
         let c_gbnf = CString::new(grammar_str)?;
         let c_root = CString::new(root)?;
-        let words: Vec<CString> = trigger_words
-            .into_iter()
-            .map(|w| CString::new(w.as_ref()))
-            .collect::<Result<_, _>>()?;
-        let mut word_ptrs: Vec<*const c_char> = words.iter().map(|c| c.as_ptr()).collect();
+        // Build the trigger *pattern* in Rust and call `..._lazy_patterns`, rather
+        // than passing `trigger_words` to the deprecated `..._lazy`. The words path
+        // has a use-after-scope bug in ik's C++: it assembles the pattern in a local
+        // `std::string`, stashes a pointer to that local, then reads the pointer
+        // *after* the string has dropped (llama-sampling.cpp:1372-1387). The
+        // `_patterns` entry point copies each pattern into an owned `std::string`
+        // immediately (llama-grammar.cpp:1318), so a live-for-the-call pattern is
+        // safe. We reproduce the exact pattern the C++ would have built.
+        let c_pattern = match build_lazy_trigger_pattern(trigger_words) {
+            Some(pattern) => Some(CString::new(pattern)?),
+            None => None,
+        };
+        // 0 or 1 pattern pointers, borrowing `c_pattern` (alive across the call).
+        let mut pattern_ptrs: Vec<*const c_char> = c_pattern.iter().map(|c| c.as_ptr()).collect();
+        // Match the original semantics when there are no words: (null, 0).
+        let (pat_ptr, pat_len) = if pattern_ptrs.is_empty() {
+            (std::ptr::null_mut::<*const c_char>(), 0usize)
+        } else {
+            (pattern_ptrs.as_mut_ptr(), pattern_ptrs.len())
+        };
         let tokens: Vec<sys::llama_token> = trigger_tokens.iter().map(|t| t.0).collect();
         // SAFETY: model valid → const vocab.
         let vocab = unsafe { sys::llama_model_get_vocab(model.model.as_ptr()) };
         // SAFETY: valid vocab + C strings + trigger arrays live for the call
         // (ik copies what it needs). Null = parse failure.
         let raw = unsafe {
-            sys::llama_sampler_init_grammar_lazy(
+            sys::llama_sampler_init_grammar_lazy_patterns(
                 vocab,
                 c_gbnf.as_ptr(),
                 c_root.as_ptr(),
-                word_ptrs.as_mut_ptr(),
-                word_ptrs.len(),
+                pat_ptr,
+                pat_len,
                 tokens.as_ptr(),
                 tokens.len(),
             )
@@ -549,5 +613,43 @@ mod tests {
         let mut s = s;
         s.accept(LlamaTokenData::new(LlamaToken(5), 0.0, 0.0).id());
         assert_eq!(s.history, vec![LlamaToken(5)]);
+    }
+
+    #[test]
+    fn lazy_trigger_pattern_none_when_no_words() {
+        let empty: [&[u8]; 0] = [];
+        assert_eq!(build_lazy_trigger_pattern(empty), None);
+    }
+
+    #[test]
+    fn lazy_trigger_pattern_wraps_and_joins() {
+        // Two plain words -> `[\s\S]*?(<tool>|call)[\s\S]*` (byte-for-byte the
+        // string ik's C++ would have assembled from these trigger words).
+        let pat = build_lazy_trigger_pattern([b"<tool>".as_slice(), b"call".as_slice()])
+            .expect("some pattern");
+        assert_eq!(pat, br"[\s\S]*?(<tool>|call)[\s\S]*".to_vec());
+    }
+
+    #[test]
+    fn lazy_trigger_pattern_escapes_metacharacters() {
+        // Every regex metacharacter ik escapes must be backslash-prefixed so the
+        // trigger matches the literal word, not a regex.
+        let pat =
+            build_lazy_trigger_pattern([br".^$|()*+?[]{}\".as_slice()]).expect("some pattern");
+        assert_eq!(
+            pat,
+            br"[\s\S]*?(\.\^\$\|\(\)\*\+\?\[\]\{\}\\)[\s\S]*".to_vec()
+        );
+    }
+
+    #[test]
+    fn lazy_trigger_pattern_preserves_non_meta_utf8() {
+        // Multi-byte UTF-8 passes through unescaped (its bytes are all >= 0x80,
+        // none collide with the ASCII metacharacters).
+        let pat = build_lazy_trigger_pattern(["café".as_bytes()]).expect("some pattern");
+        let mut expected = br"[\s\S]*?(".to_vec();
+        expected.extend_from_slice("café".as_bytes());
+        expected.extend_from_slice(br")[\s\S]*");
+        assert_eq!(pat, expected);
     }
 }
