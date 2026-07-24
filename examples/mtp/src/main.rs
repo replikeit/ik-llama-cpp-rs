@@ -62,11 +62,12 @@ fn main() -> Result<()> {
         .with_n_threads(args.threads)
         .with_mtp(true)
         .with_seed(42);
-    let mut ctx = LlamaContext::new(&model, &cparams).context("create MTP context")?;
+    let ctx = LlamaContext::new(&model, &cparams).context("create MTP context")?;
 
     let prompt = model.tokenize(&args.prompt, true).context("tokenize")?;
 
-    let mut spec = MtpSpeculative::new(&model, &mut ctx, MtpSpeculativeParams::default())
+    // The driver takes ownership of the context (self-contained).
+    let mut spec = MtpSpeculative::new(&model, ctx, MtpSpeculativeParams::default())
         .context("init MTP driver")?;
     spec.begin(&prompt).context("MTP begin (prompt warmup)")?;
 

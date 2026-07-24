@@ -42,8 +42,9 @@ typedef struct ik_llama_rs_mtp ik_llama_rs_mtp;
 // the companion MTP context is derived from it (+ MTP warmup/embeddings overrides).
 // `temp <= 0` selects a greedy target sampler.
 //
-// Returns NULL on error, including: null args, a model with 0 NextN layers, or an
-// openPangu/recurrent target (v1 supports embedded NextN-MTP only).
+// Returns NULL on error: null args, or a model with 0 NextN layers (not MTP).
+// Recurrent / openPangu targets (incl. Qwen3.5 NextN) ARE supported via an
+// internal rollback checkpoint taken before each verify.
 ik_llama_rs_mtp * ik_llama_rs_mtp_init(
         struct llama_model                * model,
         struct llama_context              * ctx_tgt,
@@ -73,6 +74,34 @@ llama_rs_status ik_llama_rs_mtp_step(
         size_t            cap,
         size_t          * n_out,
         int32_t         * n_accepted);
+
+// Caller-driven MTP (grammar-gated / custom sampling): NO sampling in the glue.
+//
+// `draft` proposes up to n_max candidate tokens following `id_last` at position
+// `n_past`, writing them to out_tokens[0..*n_out) (ALLOCATION_FAILED if the count
+// exceeds cap). The caller then builds the verify batch `[id_last] + drafts`
+// (logits on ALL positions), decodes it on the target context, picks the
+// committed tokens with its own grammar/sampler by reading each output index,
+// and calls `commit`.
+llama_rs_status ik_llama_rs_mtp_draft(
+        ik_llama_rs_mtp * spec,
+        int32_t           n_past,
+        llama_token       id_last,
+        llama_token     * out_tokens,
+        size_t            cap,
+        size_t          * n_out);
+
+// `commit` finalizes one round: `committed` is the accepted-draft prefix plus
+// exactly one correction/bonus token (n_committed == n_accepted + 1), `n_draft`
+// is the count returned by the matching `draft`. It advances the MTP companion by
+// the accepted count and rolls the target KV back to the committed prefix. The
+// caller must NOT manipulate the target or companion KV itself. No sampling.
+llama_rs_status ik_llama_rs_mtp_commit(
+        ik_llama_rs_mtp   * spec,
+        llama_token         id_last,
+        const llama_token * committed,
+        size_t              n_committed,
+        size_t              n_draft);
 
 void ik_llama_rs_mtp_free(ik_llama_rs_mtp * spec);
 

@@ -2,9 +2,9 @@
 //
 // Wraps ik's C++ `common_speculative_*` + `common_sampler` (libcommon.a). The
 // call sequence mirrors examples/main/main.cpp's `--spec-type mtp` path.
-// Single-sequence,
-// greedy, NextN-embedded MTP only (openPangu/recurrent targets are rejected in
-// _init since they'd need the checkpoint path).
+// Single-sequence, embedded NextN MTP. Recurrent / openPangu targets (incl.
+// Qwen3.5 NextN) are supported via an internal rollback checkpoint taken before
+// each verify (see `needs_ckpt`); only a model with 0 NextN layers is rejected.
 
 #include "speculative.h" // common_speculative_*, common_params_speculative, stage params
 #include "sampling.h"     // common_sampler_*, common_params_sampling
@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -304,6 +305,112 @@ llama_rs_status ik_llama_rs_mtp_step(
             *n_accepted = (int32_t) (ids.size() - 1); // ids includes the bonus token
             h->n_past  += (llama_pos) ids.size();
         }
+        return LLAMA_RS_STATUS_OK;
+    } catch (...) {
+        return LLAMA_RS_STATUS_EXCEPTION;
+    }
+}
+
+// --- Caller-driven MTP primitives (for grammar-gated / custom sampling) ---
+//
+// These split step()'s draft->verify->sample->commit into pieces so the CALLER
+// owns token selection: no sampling happens in the glue. One round is:
+//   1. draft(n_past, id_last)               -> up to n_max candidate tokens
+//   2. [caller builds the verify batch `[id_last] + drafts` with logits on ALL
+//      positions, decodes it on the target context, and picks the committed
+//      tokens with its own grammar/sampler by reading each output index]
+//   3. commit(id_last, committed, n_committed, n_draft)
+// `committed` is the accepted-draft prefix followed by exactly ONE
+// correction/bonus token (so n_committed == n_accepted + 1). commit advances the
+// MTP companion by the accepted count and rolls the target KV back to the
+// committed prefix — the caller must NOT touch either KV cache itself.
+
+llama_rs_status ik_llama_rs_mtp_draft(
+        ik_llama_rs_mtp * h,
+        int32_t           n_past,
+        llama_token       id_last,
+        llama_token     * out,
+        size_t            cap,
+        size_t          * n_out) {
+    if (!h || !out || !n_out || n_past < 0) {
+        return LLAMA_RS_STATUS_INVALID_ARGUMENT;
+    }
+    *n_out = 0;
+    try {
+        h->n_past = (llama_pos) n_past;
+
+        // draft (empty history for pure self-spec MTP; base pos = n_past)
+        std::vector<llama_token> draft_history;
+        common_speculative_draft_result dr = common_speculative_draft_ex(
+            h->spec, h->ctx_tgt, h->params, draft_history, id_last, h->n_past, h->seq_id);
+        std::vector<llama_token> & draft = dr.tokens;
+
+        // recurrent / openPangu targets: checkpoint before the caller verifies so
+        // commit() can roll the recurrent/hidden state back on a rejection. If the
+        // save fails, drop the draft (single-token fallback), matching step().
+        if (h->needs_ckpt) {
+            const bool ok = common_speculative_before_draft(
+                h->spec, h->model, h->ctx_tgt, h->smpl, h->sparams,
+                h->seq_id, h->n_past, id_last, (int) draft.size() + 1,
+                h->params.recurrent_ckpt_mode);
+            if (!ok) {
+                draft.clear();
+            }
+        }
+
+        // clamp to context/batch limits so the caller's verify batch never places
+        // a token at/over n_ctx (assert-abort) near the end (matches step()).
+        {
+            const int32_t n_ctx   = (int32_t) llama_n_ctx(h->ctx_tgt);
+            const int32_t n_batch = (int32_t) llama_n_batch(h->ctx_tgt);
+            int32_t max_draft = std::min(n_ctx - (int32_t) h->n_past - 2, n_batch - 1);
+            if (max_draft < 0) {
+                max_draft = 0;
+            }
+            if ((int32_t) draft.size() > max_draft) {
+                draft.resize((size_t) max_draft);
+            }
+        }
+
+        *n_out = draft.size();
+        if (draft.size() > cap) {
+            return LLAMA_RS_STATUS_ALLOCATION_FAILED;
+        }
+        if (!draft.empty()) {
+            std::memcpy(out, draft.data(), draft.size() * sizeof(llama_token));
+        }
+        return LLAMA_RS_STATUS_OK;
+    } catch (...) {
+        return LLAMA_RS_STATUS_EXCEPTION;
+    }
+}
+
+llama_rs_status ik_llama_rs_mtp_commit(
+        ik_llama_rs_mtp   * h,
+        llama_token         id_last,
+        const llama_token * committed,
+        size_t              n_committed,
+        size_t              n_draft) {
+    if (!h || !committed || n_committed == 0) {
+        return LLAMA_RS_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        std::vector<llama_token> ids(committed, committed + n_committed);
+        // The caller built the verify batch as [id_last] + drafts (logits on all),
+        // so output index i holds the prediction after verify position i; the
+        // committed prefix occupies output indices 0..n_committed.
+        std::vector<int32_t> accepted_output_indices;
+        accepted_output_indices.reserve(n_committed);
+        for (size_t i = 0; i < n_committed; ++i) {
+            accepted_output_indices.push_back((int32_t) i);
+        }
+        // Advances the MTP companion by the accepted count and rolls the target KV
+        // back to `n_past + n_committed` (drops rejected drafts). Consumes the
+        // already-sampled `ids`; performs no sampling itself.
+        common_speculative_commit(
+            h->spec, h->ctx_tgt, h->smpl, h->seq_id, id_last, ids,
+            (int) n_draft, h->n_past + 1, accepted_output_indices);
+        h->n_past += (llama_pos) n_committed;
         return LLAMA_RS_STATUS_OK;
     } catch (...) {
         return LLAMA_RS_STATUS_EXCEPTION;
