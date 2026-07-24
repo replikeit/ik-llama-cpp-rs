@@ -478,14 +478,25 @@ impl LlamaContext<'_> {
         unsafe { ik_llama_cpp_sys::llama_copy_state_data(self.context.as_ptr(), dest) }
     }
 
-    /// Set the state reading from the specified address
-    /// Returns the number of bytes read
+    /// Restore context state from a buffer previously produced by
+    /// [`copy_state_data`](Self::copy_state_data) (or `llama_state_get_data`) for
+    /// a *compatible* context. Returns the number of bytes read.
+    ///
+    /// The buffer length is forwarded to ik's **sized** reader
+    /// (`llama_state_set_data`), so each field read is bounds-checked against
+    /// `src.len()` — a too-short buffer is rejected C-side instead of over-reading
+    /// past the slice (as the deprecated no-size `llama_set_state_data` would).
     ///
     /// # Safety
     ///
-    /// help wanted: not entirely sure what the safety requirements are here.
+    /// `src` must be a valid serialized state blob for a context created with the
+    /// same model and compatible parameters. A malformed or mismatched blob can
+    /// make the C++ deserializer throw, which aborts the process across the FFI
+    /// boundary; only the out-of-bounds *read* is prevented here.
     pub unsafe fn set_state_data(&mut self, src: &[u8]) -> usize {
-        unsafe { ik_llama_cpp_sys::llama_set_state_data(self.context.as_ptr(), src.as_ptr()) }
+        unsafe {
+            ik_llama_cpp_sys::llama_state_set_data(self.context.as_ptr(), src.as_ptr(), src.len())
+        }
     }
 
     /// Get the size of the state for a single sequence with optional flags.

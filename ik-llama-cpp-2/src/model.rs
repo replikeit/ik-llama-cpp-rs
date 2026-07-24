@@ -185,6 +185,7 @@ impl LlamaModel {
     ///
     /// # Errors
     ///
+    /// [`LlamaError::TokenOutOfRange`] if `token` is not in `[0, n_vocab)`;
     /// [`LlamaError::TokenToPiece`] if the C conversion fails.
     pub fn token_to_piece_bytes(
         &self,
@@ -193,6 +194,17 @@ impl LlamaModel {
         special: bool,
         lstrip: Option<NonZeroU16>,
     ) -> Result<Vec<u8>, LlamaError> {
+        // ik's tokenizer does an out-of-range `cache.at(token)` (throws
+        // std::out_of_range) for a token outside `[0, n_vocab)`; that C++ throw
+        // would unwind across the `extern "C"` boundary and abort the process.
+        // Reject a bad id here so it is a normal error from safe code, not a crash.
+        let n_vocab = self.n_vocab();
+        if token.0 < 0 || token.0 >= n_vocab {
+            return Err(LlamaError::TokenOutOfRange {
+                token: token.0,
+                n_vocab,
+            });
+        }
         let lstrip_i = lstrip.map_or(0, |n| i32::from(n.get()));
         let mut buf = vec![0u8; buf_size.max(1)];
         let write = |buf: &mut [u8]| unsafe {

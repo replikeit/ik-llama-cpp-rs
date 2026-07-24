@@ -8,6 +8,7 @@
 //! type.
 
 use std::ffi::{CString, NulError};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
@@ -24,14 +25,20 @@ use ik_llama_cpp_sys as sys;
 /// with the model on init and is freed automatically when the model is freed
 /// (`llama.h`: "will be freed when the model is deleted"). This type therefore
 /// has **no `Drop`** — freeing it here would double-free (once here, once by the
-/// model). Keep the [`crate::model::LlamaModel`] it came from alive for at least
-/// as long as this adapter, and do not use an adapter after `lora_adapter_clear`
-/// or after the owning model is dropped. (This mirrors the `llama-cpp-2` anchor.)
+/// model).
+///
+/// The `'model` lifetime ties the adapter to the [`crate::model::LlamaModel`] it
+/// was built from, so the compiler enforces that the model outlives the adapter
+/// (using an adapter after its model drops would be a use-after-free, since the
+/// model frees it). This is stricter than the `llama-cpp-2` anchor, whose
+/// adapter carries no lifetime — a deliberate divergence for compile-time safety.
+/// Do not use an adapter after `lora_adapter_clear`.
 #[derive(Debug)]
 #[repr(transparent)]
 #[allow(clippy::module_name_repetitions)]
-pub struct LlamaLoraAdapter {
+pub struct LlamaLoraAdapter<'model> {
     pub(crate) lora_adapter: NonNull<sys::llama_lora_adapter>,
+    pub(crate) _model: PhantomData<&'model crate::model::LlamaModel>,
 }
 
 /// An error that can occur when initializing a lora adapter.
@@ -73,7 +80,7 @@ impl crate::model::LlamaModel {
     pub fn lora_adapter_init(
         &self,
         path: &Path,
-    ) -> Result<LlamaLoraAdapter, LlamaLoraAdapterInitError> {
+    ) -> Result<LlamaLoraAdapter<'_>, LlamaLoraAdapterInitError> {
         debug_assert!(path.exists(), "{path:?} does not exist");
 
         let path_str = path
@@ -88,8 +95,11 @@ impl crate::model::LlamaModel {
         let adapter = NonNull::new(adapter).ok_or(LlamaLoraAdapterInitError::NullResult)?;
 
         tracing::debug!(?path, "Initialized lora adapter");
+        // The returned adapter borrows `&self` (the model), so the model is
+        // guaranteed to outlive it — the model owns and frees the adapter.
         Ok(LlamaLoraAdapter {
             lora_adapter: adapter,
+            _model: PhantomData,
         })
     }
 }
@@ -107,7 +117,7 @@ impl crate::context::LlamaContext<'_> {
     /// See [`LlamaLoraAdapterSetError`] for more information.
     pub fn lora_adapter_set(
         &mut self,
-        adapter: &LlamaLoraAdapter,
+        adapter: &LlamaLoraAdapter<'_>,
         scale: f32,
     ) -> Result<(), LlamaLoraAdapterSetError> {
         // SAFETY: both the context and adapter pointers are valid and non-null
@@ -130,7 +140,7 @@ impl crate::context::LlamaContext<'_> {
     /// See [`LlamaLoraAdapterRemoveError`] for more information.
     pub fn lora_adapter_remove(
         &mut self,
-        adapter: &LlamaLoraAdapter,
+        adapter: &LlamaLoraAdapter<'_>,
     ) -> Result<(), LlamaLoraAdapterRemoveError> {
         // SAFETY: both the context and adapter pointers are valid and non-null
         // for the duration of the call.

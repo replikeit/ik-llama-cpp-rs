@@ -31,13 +31,19 @@ pub enum GgufError {
 /// Opens a GGUF file and parses only the metadata header; tensor weights are
 /// never loaded into memory (`no_alloc = true`).
 ///
-/// # Aborts
+/// # Bounds & aborts
 ///
-/// The typed value getters (`val_u32`, `val_str`, `arr_str`, …) and index-based
-/// accessors call ik functions guarded by `GGML_ASSERT`: passing an
-/// out-of-range index (`>= n_kv()` / `>= n_tensors()`) or reading a value with
-/// the wrong type aborts the **process**. Validate first via [`Self::n_kv`],
-/// [`Self::find_key`], and [`Self::kv_type`] before calling a typed getter.
+/// The typed KV *value* getters (`val_u32`, `val_str`, …) call ik functions
+/// guarded by `GGML_ASSERT`: passing an out-of-range **key** index (`>= n_kv()`)
+/// or reading a value with the wrong type aborts the **process** — validate
+/// first via [`Self::n_kv`], [`Self::find_key`], and [`Self::kv_type`].
+///
+/// The element/tensor index accessors ([`arr_str`](Self::arr_str),
+/// [`tensor_name`](Self::tensor_name), [`tensor_type`](Self::tensor_type),
+/// [`tensor_offset`](Self::tensor_offset)) instead **bounds-check the element /
+/// tensor index in Rust** and return `None` for an out-of-range index: ik's
+/// `gguf_get_tensor_*` have no `GGML_ASSERT` and `gguf_get_arr_str` asserts only
+/// the key, so relying on the C side there would read out of bounds.
 #[derive(Debug)]
 pub struct GgufContext {
     ctx: NonNull<ik_llama_cpp_sys::gguf_context>,
@@ -232,10 +238,16 @@ impl GgufContext {
 
     /// Read the `i`-th string of a string-array KV pair.
     ///
-    /// Returns `None` if the pointer is null or not valid UTF-8. Only valid
-    /// when [`arr_type`](Self::arr_type) is `GGUF_TYPE_STRING`.
+    /// Returns `None` if `i` is out of range, or the pointer is null or not valid
+    /// UTF-8. Only valid when [`arr_type`](Self::arr_type) is `GGUF_TYPE_STRING`.
     #[must_use]
     pub fn arr_str(&self, idx: i32, i: i32) -> Option<&str> {
+        // ik's `gguf_get_arr_str` asserts only `idx` (the key), not `i` (the
+        // element), then indexes `arr.data[i]` — an out-of-range `i` would read a
+        // garbage `gguf_str` and hand back a wild pointer. Bounds-check `i` here.
+        if i < 0 || i >= self.arr_len(idx) {
+            return None;
+        }
         // SAFETY: `self.ctx` is valid; the returned pointer (if non-null) points
         // to a NUL-terminated string owned by the context.
         let ptr = unsafe { ik_llama_cpp_sys::gguf_get_arr_str(self.ctx.as_ptr(), idx, i) };
@@ -254,10 +266,15 @@ impl GgufContext {
         unsafe { ik_llama_cpp_sys::gguf_get_n_tensors(self.ctx.as_ptr()) }
     }
 
-    /// Return the name of the tensor at index `i`, or `None` if the pointer is
-    /// null or not valid UTF-8.
+    /// Return the name of the tensor at index `i`, or `None` if `i` is out of
+    /// range, or the pointer is null or not valid UTF-8.
     #[must_use]
     pub fn tensor_name(&self, i: i32) -> Option<&str> {
+        // ik's `gguf_get_tensor_name` has no bounds assert and indexes
+        // `ctx->infos[i]` directly; bounds-check `i` here to avoid an OOB read.
+        if i < 0 || i >= self.n_tensors() {
+            return None;
+        }
         // SAFETY: `self.ctx` is valid; the returned pointer (if non-null) points
         // to a NUL-terminated string owned by the context.
         let ptr = unsafe { ik_llama_cpp_sys::gguf_get_tensor_name(self.ctx.as_ptr(), i) };
@@ -270,19 +287,29 @@ impl GgufContext {
     }
 
     /// Return the [`ggml_type`](ik_llama_cpp_sys::ggml_type) of the tensor at
-    /// index `i`.
+    /// index `i`, or `None` if `i` is out of range.
     #[must_use]
-    pub fn tensor_type(&self, i: i32) -> ik_llama_cpp_sys::ggml_type {
-        // SAFETY: `self.ctx` is a valid, non-null context for its lifetime.
-        unsafe { ik_llama_cpp_sys::gguf_get_tensor_type(self.ctx.as_ptr(), i) }
+    pub fn tensor_type(&self, i: i32) -> Option<ik_llama_cpp_sys::ggml_type> {
+        // ik's `gguf_get_tensor_type` has no bounds assert (`ctx->infos[i]`);
+        // bounds-check `i` here to avoid an OOB read.
+        if i < 0 || i >= self.n_tensors() {
+            return None;
+        }
+        // SAFETY: `self.ctx` is a valid, non-null context; `i` is in range.
+        Some(unsafe { ik_llama_cpp_sys::gguf_get_tensor_type(self.ctx.as_ptr(), i) })
     }
 
     /// Return the data offset (in bytes, relative to the start of the tensor
-    /// data section) of the tensor at index `i`.
+    /// data section) of the tensor at index `i`, or `None` if `i` is out of range.
     #[must_use]
-    pub fn tensor_offset(&self, i: i32) -> usize {
-        // SAFETY: `self.ctx` is a valid, non-null context for its lifetime.
-        unsafe { ik_llama_cpp_sys::gguf_get_tensor_offset(self.ctx.as_ptr(), i) }
+    pub fn tensor_offset(&self, i: i32) -> Option<usize> {
+        // ik's `gguf_get_tensor_offset` has no bounds assert (`ctx->infos[i]`);
+        // bounds-check `i` here to avoid an OOB read.
+        if i < 0 || i >= self.n_tensors() {
+            return None;
+        }
+        // SAFETY: `self.ctx` is a valid, non-null context; `i` is in range.
+        Some(unsafe { ik_llama_cpp_sys::gguf_get_tensor_offset(self.ctx.as_ptr(), i) })
     }
 }
 

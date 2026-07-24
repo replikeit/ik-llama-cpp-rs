@@ -72,6 +72,16 @@ pub enum LlamaError {
     /// Detokenization produced invalid UTF-8 that could not be recovered.
     #[error("token could not be converted to text")]
     TokenToPiece,
+    /// A token id was outside the model's vocabulary range `[0, n_vocab)`.
+    /// Handing it to ik's tokenizer would abort the process (it does an
+    /// out-of-range `std::vector::at`), so it is rejected up front.
+    #[error("token {token} out of range for vocab size {n_vocab}")]
+    TokenOutOfRange {
+        /// The offending token id.
+        token: i32,
+        /// The model's vocabulary size.
+        n_vocab: i32,
+    },
     /// `llama_decode` returned a non-zero status.
     #[error("llama_decode failed with status {0}")]
     Decode(i32),
