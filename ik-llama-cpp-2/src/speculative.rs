@@ -79,6 +79,7 @@ mod driver {
     use std::ptr::NonNull;
 
     use crate::context::LlamaContext;
+    use crate::llama_batch::LlamaBatch;
     use crate::model::LlamaModel;
     use crate::token::LlamaToken;
     use crate::LlamaError;
@@ -299,6 +300,118 @@ mod driver {
                 return Err(LlamaError::MtpStep(st as i32));
             }
             Ok(())
+        }
+
+        /// Warm the NextN companion over a decoded prompt chunk — the
+        /// caller-driven prefill primitive for cross-call KV-prefix reuse.
+        ///
+        /// Call immediately after decoding a prompt chunk on
+        /// [`target_context_mut`](Self::target_context_mut), passing the **same**
+        /// batch, which must carry output/logits on **every** position (the
+        /// warmup reads a per-position hidden row). Advances the companion KV at
+        /// the batch's positions and marks its heads warmed; performs no decode
+        /// or sampling. [`begin`](Self::begin) is exactly this in a loop over
+        /// `n_batch`-sized chunks, followed by
+        /// [`finalize_prompt`](Self::finalize_prompt).
+        ///
+        /// For a reuse, restore the target KV (via
+        /// [`target_context_mut`](Self::target_context_mut)'s
+        /// `state_seq_set_data_ext`) and the companion
+        /// ([`companion_state_set`](Self::companion_state_set)) to `reuse_from`
+        /// first, then decode+`warm` only the suffix.
+        ///
+        /// # Errors
+        ///
+        /// [`LlamaError::MtpStep`] if the glue rejects the warmup.
+        pub fn warm(&mut self, batch: &LlamaBatch) -> Result<(), LlamaError> {
+            let batch_raw = batch.as_raw();
+            // SAFETY: `batch_raw` is a valid llama_batch for the call; its buffers
+            // are owned by `batch` and outlive the call. The caller must have just
+            // decoded this batch on the target context (see method docs).
+            let st = unsafe { sys::ik_llama_rs_mtp_warm(self.raw.as_ptr(), &batch_raw) };
+            if st as i32 != 0 {
+                return Err(LlamaError::MtpStep(st as i32));
+            }
+            Ok(())
+        }
+
+        /// Finalize a caller-driven prefill: reset the draft cache/history,
+        /// capture the seed hidden at position `n_past - 1` (required before
+        /// [`draft`](Self::draft)), set the driver's `n_past`, and clear any
+        /// [`step`](Self::step) carry.
+        ///
+        /// `last_output_index` is the index of the last prompt token within the
+        /// last decoded chunk (e.g. `batch.n_tokens() - 1` of the final chunk);
+        /// `n_past` is the total prompt length. Call once, after the last
+        /// [`warm`](Self::warm).
+        ///
+        /// # Errors
+        ///
+        /// [`LlamaError::MtpStep`] if `n_past == 0`, `last_output_index < 0`, or
+        /// the glue's hidden capture fails.
+        pub fn finalize_prompt(
+            &mut self,
+            last_output_index: i32,
+            n_past: usize,
+        ) -> Result<(), LlamaError> {
+            // SAFETY: valid handle; the glue validates the indices.
+            let st = unsafe {
+                sys::ik_llama_rs_mtp_finalize_prompt(self.raw.as_ptr(), last_output_index, n_past)
+            };
+            if st as i32 != 0 {
+                return Err(LlamaError::MtpStep(st as i32));
+            }
+            Ok(())
+        }
+
+        /// Bytes needed to snapshot the NextN companion's state (KV + recurrent
+        /// state) for the bound sequence. `0` means nothing is cached yet, or
+        /// state IO is unsupported for this architecture (e.g. openPangu) — in
+        /// which case cross-call reuse is impossible and the caller must fall back
+        /// to a full [`begin`](Self::begin).
+        ///
+        /// The companion caches only the NextN tail layers, so this is a small
+        /// fraction of the target context's own
+        /// [`state_seq_get_size_ext`](LlamaContext::state_seq_get_size_ext).
+        #[must_use]
+        pub fn companion_state_size(&self) -> usize {
+            // SAFETY: valid handle; returns 0 for a null companion / unsupported arch.
+            unsafe { sys::ik_llama_rs_mtp_companion_state_size(self.raw.as_ptr()) }
+        }
+
+        /// Serialize the companion's state into `dst`, which must point to at
+        /// least [`companion_state_size`](Self::companion_state_size) bytes.
+        /// Returns the number of bytes written. Pair with the target context's
+        /// [`state_seq_get_data_ext`](LlamaContext::state_seq_get_data_ext) to
+        /// snapshot a full reuse boundary (capture both *at the same position* —
+        /// the companion's recurrent state cannot be sliced from a later state).
+        ///
+        /// # Safety
+        ///
+        /// `dst` must be valid for writes of `companion_state_size()` bytes.
+        #[must_use]
+        pub unsafe fn companion_state_get(&self, dst: *mut u8) -> usize {
+            // SAFETY: caller guarantees `dst` is sized per companion_state_size().
+            unsafe { sys::ik_llama_rs_mtp_companion_state_get(self.raw.as_ptr(), dst) }
+        }
+
+        /// Restore the companion's state from `src` (bytes previously produced by
+        /// [`companion_state_get`](Self::companion_state_get) on the same model /
+        /// context params). Returns `false` on a length/format mismatch or an
+        /// unsupported arch — the caller then falls back to a full
+        /// [`begin`](Self::begin). Pair with the target context's
+        /// [`state_seq_set_data_ext`](LlamaContext::state_seq_set_data_ext).
+        ///
+        /// # Safety
+        ///
+        /// `src` must contain valid companion state produced by
+        /// [`companion_state_get`](Self::companion_state_get).
+        pub unsafe fn companion_state_set(&mut self, src: &[u8]) -> bool {
+            // SAFETY: caller guarantees `src` is valid companion state; the glue
+            // validates the length and rejects rather than reading out of bounds.
+            unsafe {
+                sys::ik_llama_rs_mtp_companion_state_set(self.raw.as_ptr(), src.as_ptr(), src.len())
+            }
         }
 
         /// The configured parameters.

@@ -179,24 +179,21 @@ long ik_llama_rs_mtp_begin(ik_llama_rs_mtp * h, const llama_token * prompt, size
             if (llama_decode(h->ctx_tgt, bg.b) != 0) {
                 return LLAMA_RS_STATUS_EXCEPTION;
             }
-            if (common_speculative_on_target_seq_batch(
-                    h->spec, h->ctx_tgt, bg.b, h->seq_id, /*is_prompt_warmup=*/true) != 0) {
-                return LLAMA_RS_STATUS_EXCEPTION;
+            // Warm the companion over this decoded chunk (shared with the
+            // caller-driven reuse path).
+            const llama_rs_status ws = ik_llama_rs_mtp_warm(h, &bg.b);
+            if (ws != LLAMA_RS_STATUS_OK) {
+                return ws;
             }
             last_chunk_len = chunk;
             offset += (size_t) chunk;
         }
-        const int32_t   final_index = last_chunk_len - 1; // output index within the last chunk
-        const llama_pos final_pos   = (llama_pos) n - 1;
-        h->n_past = (llama_pos) n;
-
-        std::vector<llama_token> empty;
-        common_speculative_begin(h->spec, empty);
-        if (!common_speculative_capture_output_hidden(h->spec, h->ctx_tgt, final_index, h->seq_id, final_pos)) {
-            fprintf(stderr, "ik_llama_rs_mtp_begin: capture_output_hidden failed\n");
-            return LLAMA_RS_STATUS_EXCEPTION;
+        // Reset draft state + capture the seed hidden at the final prompt position
+        // (shared with the caller-driven reuse path).
+        const llama_rs_status fs = ik_llama_rs_mtp_finalize_prompt(h, last_chunk_len - 1, n);
+        if (fs != LLAMA_RS_STATUS_OK) {
+            return fs;
         }
-        h->have_carry = false;
         return (long) h->n_past;
     } catch (const std::exception & e) {
         fprintf(stderr, "ik_llama_rs_mtp_begin: exception: %s\n", e.what());
@@ -414,6 +411,107 @@ llama_rs_status ik_llama_rs_mtp_commit(
         return LLAMA_RS_STATUS_OK;
     } catch (...) {
         return LLAMA_RS_STATUS_EXCEPTION;
+    }
+}
+
+// --- Caller-driven prefill + companion snapshot (cross-call KV-prefix reuse) ---
+//
+// begin() above is the atomic no-reuse prefill, now factored over `warm` +
+// `finalize_prompt`. The caller-driven path drives the same two steps itself so
+// it can (a) start at reuse_from, and (b) snapshot the target + companion at a
+// boundary. See wrapper_common.h and the crate's MtpSpeculative for the contract.
+
+llama_rs_status ik_llama_rs_mtp_warm(ik_llama_rs_mtp * h, const llama_batch * batch) {
+    if (!h || !batch) {
+        return LLAMA_RS_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        // The caller has already decoded `*batch` on the target context (output on
+        // EVERY position); warm the companion over it — writes companion KV at the
+        // batch positions and marks heads warmed. No decode, no sampling here.
+        if (common_speculative_on_target_seq_batch(
+                h->spec, h->ctx_tgt, *batch, h->seq_id, /*is_prompt_warmup=*/true) != 0) {
+            return LLAMA_RS_STATUS_EXCEPTION;
+        }
+        return LLAMA_RS_STATUS_OK;
+    } catch (...) {
+        return LLAMA_RS_STATUS_EXCEPTION;
+    }
+}
+
+llama_rs_status ik_llama_rs_mtp_finalize_prompt(
+        ik_llama_rs_mtp * h, int32_t last_output_index, size_t n_past) {
+    if (!h || n_past == 0 || last_output_index < 0) {
+        return LLAMA_RS_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        h->n_past = (llama_pos) n_past;
+        // Reset the per-seq draft cache/history, then capture the seed hidden at
+        // the final prompt position (draft() refuses without it). Mirrors begin()'s
+        // original tail.
+        std::vector<llama_token> empty;
+        common_speculative_begin(h->spec, empty);
+        if (!common_speculative_capture_output_hidden(
+                h->spec, h->ctx_tgt, last_output_index, h->seq_id, (llama_pos) n_past - 1)) {
+            fprintf(stderr, "ik_llama_rs_mtp_finalize_prompt: capture_output_hidden failed\n");
+            return LLAMA_RS_STATUS_EXCEPTION;
+        }
+        h->have_carry = false;
+        return LLAMA_RS_STATUS_OK;
+    } catch (...) {
+        return LLAMA_RS_STATUS_EXCEPTION;
+    }
+}
+
+size_t ik_llama_rs_mtp_companion_state_size(ik_llama_rs_mtp * h) {
+    if (!h) {
+        return 0;
+    }
+    try {
+        llama_context * ctx_mtp = common_speculative_get_companion_ctx(h->spec);
+        if (!ctx_mtp) {
+            return 0;
+        }
+        return llama_state_seq_get_size(ctx_mtp, h->seq_id, /*flags=*/0);
+    } catch (...) {
+        return 0;
+    }
+}
+
+size_t ik_llama_rs_mtp_companion_state_get(ik_llama_rs_mtp * h, uint8_t * dst) {
+    if (!h || !dst) {
+        return 0;
+    }
+    try {
+        llama_context * ctx_mtp = common_speculative_get_companion_ctx(h->spec);
+        if (!ctx_mtp) {
+            return 0;
+        }
+        // `dst` was sized by the caller from companion_state_size(); pass that same
+        // size as the capacity so the write is bounded.
+        const size_t size = llama_state_seq_get_size(ctx_mtp, h->seq_id, /*flags=*/0);
+        return llama_state_seq_get_data(ctx_mtp, dst, size, h->seq_id, /*flags=*/0);
+    } catch (...) {
+        return 0;
+    }
+}
+
+bool ik_llama_rs_mtp_companion_state_set(
+        ik_llama_rs_mtp * h, const uint8_t * src, size_t len) {
+    if (!h || !src || len == 0) {
+        return false;
+    }
+    try {
+        llama_context * ctx_mtp = common_speculative_get_companion_ctx(h->spec);
+        if (!ctx_mtp) {
+            return false;
+        }
+        // Success iff the whole buffer was consumed. ik returns SIZE_MAX when state
+        // IO is unsupported (openPangu) and 0 on other failures — both != len.
+        const size_t n = llama_state_seq_set_data(ctx_mtp, src, len, h->seq_id, /*flags=*/0);
+        return n == len;
+    } catch (...) {
+        return false;
     }
 }
 

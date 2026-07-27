@@ -103,6 +103,45 @@ llama_rs_status ik_llama_rs_mtp_commit(
         size_t              n_committed,
         size_t              n_draft);
 
+// --- Caller-driven prefill (for cross-call KV-prefix reuse) ---------------
+//
+// `begin` above is the atomic no-reuse prefill. These split its body so the
+// caller can drive prefill in chunks and snapshot at a boundary (needed for
+// reuse — the recurrent companion state cannot be sliced from a later snapshot).
+// One prefill is: for each prompt chunk, the caller decodes it on the target
+// context (all-logits) then calls `warm`; after the last chunk it calls
+// `finalize_prompt`. For a reuse the caller first restores the target KV and the
+// companion state (below) to `reuse_from`, then warms only the suffix.
+
+// Warm the NextN companion over `batch` (which the caller has just decoded on the
+// target context, with output on EVERY position). Advances the companion KV at
+// the batch's positions and marks its heads warmed. Does NOT sample or decode.
+llama_rs_status ik_llama_rs_mtp_warm(
+        ik_llama_rs_mtp          * spec,
+        const struct llama_batch * batch);
+
+// Finalize a caller-driven prefill: reset the draft cache/history, capture the
+// seed hidden at position `n_past - 1` from target output index `last_output_index`
+// (required before `draft`), set the driver's `n_past`, and clear any `step()`
+// carry. `last_output_index` is the index of the last prompt token within the
+// last decoded chunk.
+llama_rs_status ik_llama_rs_mtp_finalize_prompt(
+        ik_llama_rs_mtp * spec,
+        int32_t           last_output_index,
+        size_t            n_past);
+
+// Companion (NextN) context state snapshot/restore, forwarding llama_state_seq_*
+// on common_speculative's internal companion context with flags=0 (full: KV +
+// recurrent state). Enable cross-call reuse by pairing with the target context's
+// own state_seq snapshot. Return 0 / false if the companion ctx is null or state
+// IO is unsupported for the arch (e.g. openPangu) — the caller then full-prefills.
+size_t ik_llama_rs_mtp_companion_state_size(ik_llama_rs_mtp * spec);
+size_t ik_llama_rs_mtp_companion_state_get(ik_llama_rs_mtp * spec, uint8_t * dst);
+bool   ik_llama_rs_mtp_companion_state_set(
+        ik_llama_rs_mtp * spec,
+        const uint8_t   * src,
+        size_t            len);
+
 void ik_llama_rs_mtp_free(ik_llama_rs_mtp * spec);
 
 #ifdef __cplusplus
