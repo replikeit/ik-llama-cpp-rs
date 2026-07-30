@@ -245,25 +245,47 @@ impl Stage {
     }
 }
 
-/// Build the single lazy-grammar trigger *pattern* from `trigger_words`,
-/// reproducing byte-for-byte what ik's C++ `llama_sampler_init_grammar_lazy`
-/// assembles internally: `[\s\S]*?(w1|w2|…)[\s\S]*`, with each word's regex
-/// metacharacters backslash-escaped. Returns `None` when there are no words (so
-/// the caller passes no pattern — a token-only lazy trigger), matching the C++
-/// which leaves `trigger_patterns` empty in that case.
-fn build_lazy_trigger_pattern(
+/// Build one lazy-grammar trigger *pattern* per trigger word: each word's
+/// regex metacharacters backslash-escaped, with no other wrapping — the same
+/// shape stock `llama-cpp-rs`'s wrapper emits (one escaped literal per word).
+/// All N patterns are fed to `llama_sampler_init_grammar_lazy_patterns` as N
+/// independent entries; ik's C++ ORs them (`llama_grammar_accept_impl` loops
+/// over `grammar.trigger_patterns` in `llama-grammar.cpp` and fires — sets
+/// `awaiting_trigger = false` and returns — on the *first* one that matches),
+/// so this is equivalent to the old "any of these words" semantics.
+///
+/// Earlier this crate wrapped every word into a single wide pattern
+/// (`[\s\S]*?(w1|w2|…)[\s\S]*`) to route around a C++ use-after-scope bug in
+/// the word-taking entry point (see [`LlamaSampler::grammar_lazy`]'s doc
+/// comment for that history — now fixed upstream). That wrapping was never
+/// necessary for correctness: `llama_grammar_trigger_pattern::find`'s
+/// `find_start_pos` helper looks for the first non-empty capturing group and
+/// falls back to `match.position(0)` (the whole match's start) when there is
+/// none. The old wrapped pattern had exactly one capturing group around the
+/// word alternation, so `start` was that group's position; a bare escaped
+/// literal has *no* capturing group at all, so the fallback fires instead —
+/// landing on `match.position(0)`, which for a plain literal `regex_search` is
+/// the exact same index (the word's own start). Same grammar-feed offset
+/// either way. But the `[\s\S]*?` backtracking prefix — re-run over the whole
+/// accumulated trigger buffer on *every* token while the grammar is dormant —
+/// measured a ~29x slowdown on a 2048-token generation. Dropping it (this
+/// function) is the actual fix for the word-trigger path's performance; Part
+/// A's hoist only fixed its memory safety.
+///
+/// Returns an empty `Vec` when there are no words (so the caller passes no
+/// patterns — a token-only lazy trigger), matching the C++, which leaves
+/// `trigger_patterns` empty in that case.
+fn build_lazy_trigger_patterns(
     trigger_words: impl IntoIterator<Item = impl AsRef<[u8]>>,
-) -> Option<Vec<u8>> {
-    let mut words = trigger_words.into_iter();
-    let first = words.next()?;
-    let mut pattern: Vec<u8> = b"[\\s\\S]*?(".to_vec();
-    push_regex_escaped(&mut pattern, first.as_ref());
-    for word in words {
-        pattern.push(b'|');
-        push_regex_escaped(&mut pattern, word.as_ref());
-    }
-    pattern.extend_from_slice(b")[\\s\\S]*");
-    Some(pattern)
+) -> Vec<Vec<u8>> {
+    trigger_words
+        .into_iter()
+        .map(|word| {
+            let mut pattern = Vec::new();
+            push_regex_escaped(&mut pattern, word.as_ref());
+            pattern
+        })
+        .collect()
 }
 
 /// Append `word` to `out`, backslash-escaping the regex metacharacters ik's C++
@@ -445,20 +467,28 @@ impl LlamaSampler {
     ) -> Result<Self, GrammarInitError> {
         let c_gbnf = CString::new(grammar_str)?;
         let c_root = CString::new(root)?;
-        // Build the trigger *pattern* in Rust and call `..._lazy_patterns`, rather
-        // than passing `trigger_words` to the deprecated `..._lazy`. The words path
-        // has a use-after-scope bug in ik's C++: it assembles the pattern in a local
-        // `std::string`, stashes a pointer to that local, then reads the pointer
-        // *after* the string has dropped (llama-sampling.cpp:1372-1387). The
-        // `_patterns` entry point copies each pattern into an owned `std::string`
-        // immediately (llama-grammar.cpp:1318), so a live-for-the-call pattern is
-        // safe. We reproduce the exact pattern the C++ would have built.
-        let c_pattern = match build_lazy_trigger_pattern(trigger_words) {
-            Some(pattern) => Some(CString::new(pattern)?),
-            None => None,
-        };
-        // 0 or 1 pattern pointers, borrowing `c_pattern` (alive across the call).
-        let mut pattern_ptrs: Vec<*const c_char> = c_pattern.iter().map(|c| c.as_ptr()).collect();
+        // Call `..._lazy_patterns` — never the word-taking
+        // `llama_sampler_init_grammar_lazy`, even though Part A's hoist fixed
+        // its C++ use-after-scope (llama-sampling.cpp:1372-1387, now hoisted
+        // to function scope). That entry point is marked `DEPRECATED(...)` in
+        // ik's own `llama.h` (hint: "use llama_sampler_init_grammar_lazy_patterns
+        // instead"), and `llama-sampling.cpp` carries a `// TODO: remove
+        // trigger_words support.` comment directly on it — calling it would be
+        // depending on code the vendor intends to delete.
+        //
+        // Instead, marshal `trigger_words` into N independent escaped-literal
+        // patterns ourselves (`build_lazy_trigger_patterns` — one per word, no
+        // wrapping), which ik's C++ ORs together (fires as soon as any one
+        // pattern matches — see that function's doc comment for the trace
+        // through `llama_grammar_accept_impl`/`llama_grammar_trigger_pattern::find`
+        // confirming both the OR semantics and that dropping the old
+        // `[\s\S]*?(...)/[\s\S]*` bookends doesn't change the match offset).
+        let c_patterns: Vec<CString> = build_lazy_trigger_patterns(trigger_words)
+            .into_iter()
+            .map(CString::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        // N pattern pointers, borrowing `c_patterns` (alive across the call).
+        let mut pattern_ptrs: Vec<*const c_char> = c_patterns.iter().map(|c| c.as_ptr()).collect();
         // Match the original semantics when there are no words: (null, 0).
         let (pat_ptr, pat_len) = if pattern_ptrs.is_empty() {
             (std::ptr::null_mut::<*const c_char>(), 0usize)
@@ -616,40 +646,52 @@ mod tests {
     }
 
     #[test]
-    fn lazy_trigger_pattern_none_when_no_words() {
+    fn lazy_trigger_patterns_empty_when_no_words() {
         let empty: [&[u8]; 0] = [];
-        assert_eq!(build_lazy_trigger_pattern(empty), None);
+        assert_eq!(build_lazy_trigger_patterns(empty), Vec::<Vec<u8>>::new());
     }
 
     #[test]
-    fn lazy_trigger_pattern_wraps_and_joins() {
-        // Two plain words -> `[\s\S]*?(<tool>|call)[\s\S]*` (byte-for-byte the
-        // string ik's C++ would have assembled from these trigger words).
-        let pat = build_lazy_trigger_pattern([b"<tool>".as_slice(), b"call".as_slice()])
-            .expect("some pattern");
-        assert_eq!(pat, br"[\s\S]*?(<tool>|call)[\s\S]*".to_vec());
+    fn lazy_trigger_patterns_one_literal_per_word() {
+        // Two plain words -> two independent literal patterns (`<tool>` and
+        // `call`), no `[\s\S]*?(...)` / `[\s\S]*` wrapping and no `|`-joining
+        // into one pattern. ik's C++ ORs the array: `llama_grammar_accept_impl`
+        // loops `grammar.trigger_patterns` and fires on the first match.
+        let pats = build_lazy_trigger_patterns([b"<tool>".as_slice(), b"call".as_slice()]);
+        assert_eq!(pats, vec![b"<tool>".to_vec(), b"call".to_vec()]);
     }
 
     #[test]
-    fn lazy_trigger_pattern_escapes_metacharacters() {
-        // Every regex metacharacter ik escapes must be backslash-prefixed so the
-        // trigger matches the literal word, not a regex.
-        let pat =
-            build_lazy_trigger_pattern([br".^$|()*+?[]{}\".as_slice()]).expect("some pattern");
-        assert_eq!(
-            pat,
-            br"[\s\S]*?(\.\^\$\|\(\)\*\+\?\[\]\{\}\\)[\s\S]*".to_vec()
-        );
+    fn lazy_trigger_patterns_escape_metacharacters() {
+        // Every regex metacharacter ik's C++ word-path escapes must still be
+        // backslash-prefixed here (so the pattern matches the literal word,
+        // not a regex) — but still exactly one literal per word, unwrapped.
+        let pats = build_lazy_trigger_patterns([br".^$|()*+?[]{}\".as_slice()]);
+        assert_eq!(pats, vec![br"\.\^\$\|\(\)\*\+\?\[\]\{\}\\".to_vec()]);
     }
 
     #[test]
-    fn lazy_trigger_pattern_preserves_non_meta_utf8() {
+    fn lazy_trigger_patterns_preserve_non_meta_utf8() {
         // Multi-byte UTF-8 passes through unescaped (its bytes are all >= 0x80,
         // none collide with the ASCII metacharacters).
-        let pat = build_lazy_trigger_pattern(["café".as_bytes()]).expect("some pattern");
-        let mut expected = br"[\s\S]*?(".to_vec();
-        expected.extend_from_slice("café".as_bytes());
-        expected.extend_from_slice(br")[\s\S]*");
-        assert_eq!(pat, expected);
+        let pats = build_lazy_trigger_patterns(["café".as_bytes()]);
+        assert_eq!(pats, vec!["café".as_bytes().to_vec()]);
+    }
+
+    #[test]
+    fn lazy_trigger_patterns_have_no_backtracking_bookends() {
+        // Regression guard for the perf fix specifically: no pattern may
+        // contain the old `[\s\S]` wrapping this crate used to add (a
+        // backtracking prefix re-run over the whole trigger buffer on every
+        // token while the grammar is dormant — measured a ~29x slowdown on a
+        // 2048-token generation before this fix).
+        let pats = build_lazy_trigger_patterns([b"<tool>".as_slice(), b"call".as_slice()]);
+        for pat in &pats {
+            let s = String::from_utf8_lossy(pat);
+            assert!(
+                !s.contains(r"[\s\S]"),
+                "trigger pattern must not contain the old backtracking bookend: {s:?}"
+            );
+        }
     }
 }

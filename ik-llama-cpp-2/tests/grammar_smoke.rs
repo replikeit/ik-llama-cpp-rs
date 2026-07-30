@@ -322,3 +322,156 @@ fn dry_sampler_applies_and_tracks_history() {
     assert!(generated >= 1, "should have generated at least one token");
     println!("DRY SMOKE OK: generated={generated}");
 }
+
+/// A lazy grammar armed via TWO `trigger_words` (NOT `trigger_tokens`):
+/// exercises `LlamaSampler::grammar_lazy`'s word-trigger path end to end —
+/// dormant before the trigger text appears, constraining after — and, by
+/// using two words where only the *second* ever appears, exercises the
+/// multi-pattern path specifically (not just a single pattern).
+///
+/// This is the regression guard for two things:
+///
+/// * The C++ use-after-scope hoist in `llama_sampler_init_grammar_impl`
+///   (`ik_llama.cpp/src/llama-sampling.cpp`): before the hoist, the trigger
+///   pattern assembled from `trigger_words` was stored through a pointer to a
+///   `std::string` local that had already been destroyed by the time
+///   `llama_grammar_init_impl` read it.
+/// * `LlamaSampler::grammar_lazy`'s own pattern marshaling
+///   (`build_lazy_trigger_patterns` + the `Vec<CString>`/`Vec<*const c_char>`
+///   plumbing to `llama_sampler_init_grammar_lazy_patterns`): passing two
+///   independent single-word literal patterns and firing on the one that
+///   isn't first in the array catches an off-by-one/truncated-length bug in
+///   that marshaling, and — since the OTHER word ("purple") never appears
+///   anywhere in the fed text — firing at all here is only possible if ik's
+///   C++ treats multiple `trigger_patterns` as OR (arms on *any* match), not
+///   AND (which would need every pattern to match and would leave this
+///   grammar dormant forever, since "purple" is never fed).
+#[test]
+fn grammar_lazy_trigger_word_fires() {
+    let (_backend, model) = setup();
+
+    let cparams = LlamaContextParams::default()
+        .with_n_ctx(std::num::NonZeroU32::new(2048))
+        .with_n_threads(8)
+        .with_seed(123);
+    let mut ctx = LlamaContext::new(&model, &cparams).expect("context");
+
+    // Prime the sequence with filler that does not contain the trigger word.
+    let prompt = model
+        .tokenize("The weather today is", true)
+        .expect("tokenize prompt");
+    let mut batch = LlamaBatch::new(prompt.len().max(64), 1);
+    batch.add_sequence(&prompt, 0, false).expect("add prompt");
+    ctx.decode(&mut batch).expect("decode prompt");
+    let mut n_past = batch.n_tokens();
+    let mut logits_idx = batch.n_tokens() - 1;
+
+    // A grammar requiring the literal "42" followed by at least one more
+    // digit. The trigger word "42" is itself grammar-conformant, so replaying
+    // it into the grammar's acceptor on firing cannot dead-end the parse
+    // stack (see `llama_grammar_accept_token`, which throws if a replayed
+    // piece leaves every stack empty). The mandatory extra digit also means
+    // the very next post-trigger token cannot be EOG, so the constrained
+    // assertion below can't be trivially skipped by an early, legitimate stop.
+    //
+    // Two trigger words on purpose: "purple" (never fed below — exercises the
+    // second pattern slot / OR semantics) and "42" (the one actually fed).
+    let mut sampler = LlamaSampler::chain_simple([
+        LlamaSampler::grammar_lazy(
+            &model,
+            "root ::= \"42\" [0-9] [0-9]*",
+            "root",
+            ["purple", "42"],
+            &[],
+        )
+        .expect("lazy grammar stage"),
+        LlamaSampler::greedy(),
+    ]);
+
+    // Before the trigger fires, `llama_grammar_sample_impl` returns
+    // immediately on `awaiting_trigger` without touching any logit — checked
+    // directly against the pre-apply logits, so this holds regardless of
+    // what the model would say next (no model-output assumption baked in).
+    let pre_logits: Vec<f32> = ctx
+        .token_data_array_ith(logits_idx)
+        .data
+        .iter()
+        .map(ik_llama_cpp_2::LlamaTokenData::logit)
+        .collect();
+    let mut probe = ctx.token_data_array_ith(logits_idx);
+    sampler.apply(&mut probe);
+    let probed_logits: Vec<f32> = probe
+        .data
+        .iter()
+        .map(ik_llama_cpp_2::LlamaTokenData::logit)
+        .collect();
+    assert_eq!(
+        pre_logits, probed_logits,
+        "lazy grammar altered logits before its trigger word appeared"
+    );
+
+    // Feed neutral filler (no trigger substring) then the trigger word's own
+    // tokens through `accept`, decoding each for real so the context's KV
+    // cache stays coherent with what the sampler now believes has happened.
+    // The filler gets buffered and discarded (the eventual regex match starts
+    // strictly after it); the trigger tokens flip the grammar from
+    // "awaiting" to "armed", replaying "42" into the grammar acceptor.
+    let filler = model
+        .tokenize(" It is sunny and", false)
+        .expect("tokenize filler");
+    let trigger_tokens = model.tokenize("42", false).expect("tokenize trigger word");
+    assert!(
+        !trigger_tokens.is_empty(),
+        "trigger word must tokenize to at least one token"
+    );
+    for &t in filler.iter().chain(trigger_tokens.iter()) {
+        sampler.accept(t);
+        batch.clear();
+        batch.add(t, n_past, &[0], true).expect("add fed token");
+        n_past += 1;
+        ctx.decode(&mut batch).expect("decode fed token");
+    }
+    logits_idx = 0;
+
+    // After firing: the grammar must now constrain. Every ASCII piece
+    // produced from here on must be digits-only (mirrors the ASCII-only
+    // tolerance the other grammar smoke tests use for byte/partial-UTF-8
+    // pieces), and the first one in particular cannot be EOG (see grammar
+    // comment above).
+    let mut produced = String::new();
+    let mut constrained_any = false;
+    for step in 0..6 {
+        let mut arr = ctx.token_data_array_ith(logits_idx);
+        sampler.apply(&mut arr);
+        let tok = arr.selected_token().expect("selector picked a token");
+        let eog = model.is_eog(tok);
+        assert!(
+            !(step == 0 && eog),
+            "grammar allowed EOG immediately after the trigger word, before its mandatory extra digit"
+        );
+        if eog {
+            break;
+        }
+        let piece = model.token_to_piece_lossy(tok).unwrap_or_default();
+        if piece.is_ascii() && !piece.is_empty() {
+            assert!(
+                piece.chars().all(|c| c.is_ascii_digit()),
+                "post-trigger output let a non-digit piece through: {piece:?}"
+            );
+            constrained_any = true;
+        }
+        produced.push_str(&piece);
+        sampler.accept(tok);
+        batch.clear();
+        batch.add(tok, n_past, &[0], true).expect("add token");
+        n_past += 1;
+        ctx.decode(&mut batch).expect("decode token");
+        logits_idx = 0;
+    }
+
+    assert!(
+        constrained_any,
+        "expected at least one ascii digit-constrained piece after the trigger word fired; got {produced:?}"
+    );
+    println!("LAZY-GRAMMAR-WORD-TRIGGER SMOKE OK: post-trigger output = {produced:?}");
+}
