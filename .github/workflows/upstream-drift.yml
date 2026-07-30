@@ -1,0 +1,69 @@
+# Weekly check: how far behind ikawrakow/ik_llama.cpp is our vendored fork
+# branch (replikeit/ik_llama.cpp @ ik-mtp-fixes)? Opens/updates ONE tracking
+# issue listing the new upstream commits, and closes it when back in sync.
+#
+# It only NOTIFIES — it never rebases. Replaying our local patches onto a newer
+# upstream can conflict (see the fork-maintenance notes), so the bump stays a
+# human step; this just removes "remember to check".
+name: Upstream drift (ik_llama.cpp)
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FORK: https://github.com/replikeit/ik_llama.cpp
+      UPSTREAM: https://github.com/ikawrakow/ik_llama.cpp.git
+      BRANCH: ik-mtp-fixes
+    steps:
+      - name: Compare fork branch to upstream and file/refresh a tracking issue
+        run: |
+          set -euo pipefail
+          git clone --quiet --no-tags "$FORK" fork
+          cd fork
+          git remote add upstream "$UPSTREAM"
+          git fetch --quiet --no-tags upstream main
+          git fetch --quiet --no-tags origin "$BRANCH"
+
+          base=$(git merge-base "origin/$BRANCH" upstream/main)
+          n=$(git rev-list --count "$base"..upstream/main)
+          echo "Behind upstream by $n commits (base ${base:0:12})."
+
+          # Ensure the label exists (idempotent) so `issue list --label` is safe.
+          gh label create upstream-drift --repo "$GITHUB_REPOSITORY" \
+            --color FBCA04 --description "Vendored ik_llama.cpp is behind upstream" 2>/dev/null || true
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label upstream-drift --json number --jq '.[0].number // empty' 2>/dev/null || true)
+
+          if [ "$n" -eq 0 ]; then
+            echo "In sync with upstream."
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$GITHUB_REPOSITORY" \
+                --comment "Vendored fork is back in sync with ikawrakow/main. Auto-closing."
+            fi
+            exit 0
+          fi
+
+          commits=$(git log --oneline --no-decorate "$base"..upstream/main | head -50)
+          title="Upstream ik_llama.cpp drift: $n commits behind"
+          # printf format is single-quoted, so backticks / ``` are literal and
+          # cannot trigger command substitution; %s fills the dynamic parts.
+          printf -v body '`ik-llama-cpp-sys/ik_llama.cpp` (fork branch `%s`) is **%s commits behind** `ikawrakow/ik_llama.cpp@main`.\n\nOur patch base: `%s`\n\nNew upstream commits (newest first, up to 50):\n\n```\n%s\n```\n\nTo update: rebase `%s` onto the new upstream, `--force-with-lease` the fork, then bump the parent gitlink. The pin is deliberate — bump only when you want one of these changes. Auto-refreshes weekly; auto-closes when back in sync.' \
+            "$BRANCH" "$n" "${base:0:12}" "$commits" "$BRANCH"
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            echo "Updated issue #$existing."
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --label upstream-drift --body "$body"
+          fi
