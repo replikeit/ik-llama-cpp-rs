@@ -6,3 +6,5 @@ Cargo.lock
 /.models
 # Internal superpowers planning/design notes — kept locally, not published.
 /docs/superpowers/
+# Subagent-driven-development scratch workspace (ledger, briefs, review packages).
+/.superpowers/
