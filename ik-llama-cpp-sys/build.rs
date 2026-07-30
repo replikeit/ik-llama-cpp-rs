@@ -53,6 +53,16 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={f}");
     }
+    // Directory-level rerun-if-changed for the vendored C++ submodule: cargo
+    // walks each dir (a stat pass per build) so edits to any tracked file
+    // under them (e.g. common/speculative.cpp) trigger a rebuild. Deliberately
+    // NOT the `ik_llama.cpp/` root — that would sweep in CMake build output
+    // and model files and cause spurious rebuilds.
+    println!("cargo:rerun-if-changed=ik_llama.cpp/common");
+    println!("cargo:rerun-if-changed=ik_llama.cpp/src");
+    println!("cargo:rerun-if-changed=ik_llama.cpp/ggml/src");
+    println!("cargo:rerun-if-changed=ik_llama.cpp/ggml/include");
+    println!("cargo:rerun-if-changed=ik_llama.cpp/include");
     println!("cargo:rerun-if-env-changed=IK_LLAMA_CPP_SRC");
     println!("cargo:rerun-if-env-changed=IK_LLAMA_CPP_LIB_DIR");
 
