@@ -42,3 +42,31 @@ jobs:
         run: cargo test -p ik-llama-cpp-2
       - name: Compile-check smoke tests
         run: cargo test -p ik-llama-cpp-2 --features common,_smoke --no-run
+
+  check-macos-cpu:
+    name: build + test (macos arm64, CPU-only, no metal)
+    runs-on: macos-14
+    # _vDSP_ regression guard (see ik-llama-cpp-sys/build.rs: link_apple_cpu).
+    # ggml's CPU path calls Accelerate's vDSP whenever GGML_ACCELERATE is on
+    # (ggml/CMakeLists.txt defaults it ON on Apple), independent of the
+    # `metal` feature/backend. `cargo build --lib` alone can't catch a
+    # missing framework link: an rlib defers the link to whatever finally
+    # consumes it, so the library alone stays green. This job deliberately
+    # builds WITHOUT the `metal` feature and then links a real executable
+    # (the unit-test harness, via `cargo test`) to force the link step. If
+    # build.rs ever regresses to emitting `framework=Accelerate` only under
+    # `want_metal`, this job fails here with undefined `_vDSP_*` symbols.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install build deps
+        run: brew install cmake pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build (CPU-only, common feature, no metal)
+        run: cargo build -p ik-llama-cpp-2 --features common
+      # This is the step that actually catches the regression: `cargo test`
+      # links a real executable (the test harness), unlike the plain `build`
+      # above which only produces an rlib and defers linking.
+      - name: Test (unit) — links a real executable
+        run: cargo test -p ik-llama-cpp-2 --features common

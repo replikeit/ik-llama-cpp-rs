@@ -137,6 +137,13 @@ fn main() {
         link_vulkan();
     }
 
+    // ---- Apple CPU framework(s) (macOS only; UNCONDITIONAL — independent of
+    // want_metal). ggml's CPU path needs Accelerate whether or not Metal is
+    // built; see link_apple_cpu() for why. ----
+    if cfg!(target_os = "macos") {
+        link_apple_cpu();
+    }
+
     // ---- Apple Metal frameworks (macOS only; want_metal is already gated) ----
     if want_metal {
         link_metal();
@@ -534,14 +541,54 @@ fn link_vulkan() {
     }
 }
 
-/// Link the Apple frameworks ggml/Metal need. Only called on macOS (see
-/// `want_metal`). `Foundation`/`Accelerate` back ggml's CPU + Metal init;
-/// `Metal`/`MetalKit` are the GPU backend.
+/// Link the Apple framework(s) ggml's CPU path needs. Called on every macOS
+/// build (see the `cfg!(target_os = "macos")` call site), independent of
+/// `want_metal` — this is NOT part of the Metal backend.
+///
+/// ggml/CMakeLists.txt defaults `GGML_ACCELERATE` to `ON` (unconditionally,
+/// all platforms — inert on non-Apple), and ggml/src/CMakeLists.txt's
+/// `if (APPLE AND GGML_ACCELERATE)` block — NOT nested under `GGML_METAL` —
+/// defines `GGML_USE_ACCELERATE` unconditionally on Apple. Under that macro,
+/// `ggml/src/ggml.c`'s CPU path (`ggml_vec_scale_f32`, softmax, `ggml_compute_
+/// forward_{add,sub,mul,div}`, ...) calls straight-C vDSP routines
+/// (`vDSP_vsmul`, `vDSP_vsmsa`, `vDSP_sve`, `vDSP_maxv`, `vDSP_vadd`,
+/// `vDSP_vsub`, `vDSP_vmul`, `vDSP_vdiv`, `vDSP_vsadd`) whether or not Metal is
+/// enabled. A CPU-only macOS build (`want_metal == false`) still compiles
+/// those calls, so `Accelerate` must be linked unconditionally on macOS —
+/// otherwise a downstream cdylib/executable fails with undefined `_vDSP_*`
+/// (an rlib defers the link, so `cargo build`/`check` of the library alone
+/// stays green and hides the bug).
+///
+/// `Foundation` is deliberately NOT linked here (CPU-only). Evidence:
+///   * ggml/src/CMakeLists.txt only `find_library(FOUNDATION_LIBRARY
+///     Foundation REQUIRED)`s inside its `if (GGML_METAL)` block — never
+///     inside the `APPLE AND GGML_ACCELERATE` block.
+///   * Grepping the vendored ggml sources for Objective-C markers
+///     (`@interface`, `@implementation`, `#import <...>`) across all of
+///     `ggml/src` and `ggml/include` turns up exactly one file:
+///     `ggml/src/ggml-metal.m` (the Metal backend). `GGML_USE_ACCELERATE`
+///     itself appears only in `ggml/src/ggml.c`, nowhere else in the tree.
+///   * vDSP/vecLib (what the CPU path calls) is a plain C API; it does not
+///     require the Foundation (Objective-C runtime) framework to link or run.
+/// See `link_metal()` for the Metal-only `Foundation` link.
+fn link_apple_cpu() {
+    println!("cargo:rustc-link-lib=framework=Accelerate");
+}
+
+/// Link the Apple frameworks the Metal GPU backend needs. Only called when
+/// `want_metal` (macOS + the `metal` feature).
+///
+/// `ggml/src/ggml-metal.m` is Objective-C (`@interface`/`@implementation`/
+/// `@autoreleasepool`, `NSString`/`NSError`/`NSURL`/`NSProcessInfo` usage),
+/// hence `Foundation`; `Metal`/`MetalKit` are the GPU API itself. This mirrors
+/// ggml/src/CMakeLists.txt's `if (GGML_METAL)` block, which `find_library(...
+/// REQUIRED)`s all three together (Foundation, Metal, MetalKit) — distinct
+/// from the CPU-only `Accelerate` link in `link_apple_cpu()`, which is NOT
+/// gated on `GGML_METAL` upstream either.
 fn link_metal() {
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=Metal");
     println!("cargo:rustc-link-lib=framework=MetalKit");
-    println!("cargo:rustc-link-lib=framework=Accelerate");
 }
 
 fn link_system(static_stdcxx: bool, want_openmp: bool) {
