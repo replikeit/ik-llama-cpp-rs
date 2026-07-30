@@ -329,23 +329,24 @@ fn dry_sampler_applies_and_tracks_history() {
 /// using two words where only the *second* ever appears, exercises the
 /// multi-pattern path specifically (not just a single pattern).
 ///
-/// This is the regression guard for two things:
+/// This is the regression guard for `LlamaSampler::grammar_lazy`'s pattern
+/// marshaling (`build_lazy_trigger_patterns` + the `Vec<CString>`/`Vec<*const
+/// c_char>` plumbing to `llama_sampler_init_grammar_lazy_patterns`): passing two
+/// independent single-word literal patterns and firing on the one that isn't
+/// first in the array catches an off-by-one/truncated-length bug in that
+/// marshaling, and — since the OTHER word ("purple") never appears anywhere in
+/// the fed text — firing at all here is only possible if ik's C++ treats
+/// multiple `trigger_patterns` as OR (arms on *any* match), not AND (which would
+/// need every pattern to match and would leave this grammar dormant forever,
+/// since "purple" is never fed).
 ///
-/// * The C++ use-after-scope hoist in `llama_sampler_init_grammar_impl`
-///   (`ik_llama.cpp/src/llama-sampling.cpp`): before the hoist, the trigger
-///   pattern assembled from `trigger_words` was stored through a pointer to a
-///   `std::string` local that had already been destroyed by the time
-///   `llama_grammar_init_impl` read it.
-/// * `LlamaSampler::grammar_lazy`'s own pattern marshaling
-///   (`build_lazy_trigger_patterns` + the `Vec<CString>`/`Vec<*const c_char>`
-///   plumbing to `llama_sampler_init_grammar_lazy_patterns`): passing two
-///   independent single-word literal patterns and firing on the one that
-///   isn't first in the array catches an off-by-one/truncated-length bug in
-///   that marshaling, and — since the OTHER word ("purple") never appears
-///   anywhere in the fed text — firing at all here is only possible if ik's
-///   C++ treats multiple `trigger_patterns` as OR (arms on *any* match), not
-///   AND (which would need every pattern to match and would leave this
-///   grammar dormant forever, since "purple" is never fed).
+/// It does NOT exercise the companion C++ use-after-scope hoist in
+/// `llama_sampler_init_grammar_impl` (`ik_llama.cpp/src/llama-sampling.cpp`):
+/// that bug lives in the word-taking (`trigger_words != nullptr`) branch, but
+/// `grammar_lazy` always calls `..._lazy_patterns` with `trigger_words = nullptr`,
+/// so no Rust path reaches it. The hoist is a defensive fix for C++ and any
+/// future caller of the deprecated word API; it is verified by inspection, not
+/// by this test.
 #[test]
 fn grammar_lazy_trigger_word_fires() {
     let (_backend, model) = setup();
