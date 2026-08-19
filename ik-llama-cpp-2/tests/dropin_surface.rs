@@ -34,6 +34,10 @@ fn n_gpu_layers() -> u32 {
 /// the sampler chain + grammar gate, streaming detokenize, and kv-cache ops.
 #[test]
 fn dropin_non_mtp_surface_compiles_and_runs() {
+    // Same signature as llama-cpp-2's, and same "before backend init" contract.
+    // Behaviour is covered by tests/log_bridge.rs; here it is a parity check.
+    ik_llama_cpp_2::send_logs_to_tracing(ik_llama_cpp_2::LogOptions::default());
+
     let backend = LlamaBackend::init().expect("backend");
 
     // --- model params + load ---

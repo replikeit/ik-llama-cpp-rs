@@ -14,6 +14,20 @@ repacks, BitNet, …) or its Multi-Token-Prediction (NextN) path. Production cod
 > ik and stock llama.cpp export the same `llama_*`/`ggml_*` symbols and have incompatible ggml
 > ABIs — **never link both into one process** (feature-gate one runtime per binary).
 
+## Logs
+
+The C side otherwise writes to stderr unconditionally (~330 lines per model load, release builds
+included). Redirect it into `tracing` before touching the backend:
+
+```rust
+ik_llama_cpp_2::send_logs_to_tracing(ik_llama_cpp_2::LogOptions::default());
+let backend = ik_llama_cpp_2::LlamaBackend::init()?;
+```
+
+ik's vendored ggml predates upstream's `ggml_log_set`, so `llama_log_set` is the whole hook: it
+covers llama.cpp plus the active backend's logger (CUDA / Metal), but not core `ggml.c`'s own
+`fprintf(stderr, …)` diagnostics.
+
 ## Build
 
 Two modes (Linux CPU + CUDA supported in v1):

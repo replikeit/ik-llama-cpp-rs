@@ -16,6 +16,7 @@ pub mod gguf;
 pub mod grammar;
 pub mod llama_backend;
 pub mod llama_batch;
+mod log;
 pub mod model;
 #[cfg(feature = "mtmd")]
 pub mod mtmd;
@@ -32,6 +33,7 @@ pub use grammar::{json_schema_to_grammar, JsonSchemaError};
 pub use grammar::{DryInitError, DryParams, GrammarInitError, LlamaDrySampler, LlamaGrammar};
 pub use llama_backend::LlamaBackend;
 pub use llama_batch::LlamaBatch;
+pub use log::{send_logs_to_tracing, LogOptions};
 pub use model::params::LlamaModelParams;
 pub use model::{AddBos, LlamaModel};
 #[cfg(feature = "mtmd")]
