@@ -5,7 +5,9 @@
 //!     link the prebuilt `libllama`/`libggml` (+ static `libcommon.a` under
 //!     `common`) found there. Bindgen still runs off the source headers.
 //!   * **CMake build** — otherwise build ik_llama.cpp from source (submodule or
-//!     `IK_LLAMA_CPP_SRC`) with `-DGGML_MAX_CONTEXTS=2048`.
+//!     `IK_LLAMA_CPP_SRC`) with `-DGGML_MAX_CONTEXTS=2048`, always in an
+//!     optimized CMake profile (`Release` unless `IK_LLAMA_LIB_PROFILE` says
+//!     otherwise) — *not* the Cargo profile.
 //!
 //! ik has no `install()` rules for the static archives and no
 //! `ggml-config.cmake` / `LLAMA_USE_SYSTEM_GGML` — so this crate's build.rs is
@@ -65,6 +67,7 @@ fn main() {
     println!("cargo:rerun-if-changed=ik_llama.cpp/include");
     println!("cargo:rerun-if-env-changed=IK_LLAMA_CPP_SRC");
     println!("cargo:rerun-if-env-changed=IK_LLAMA_CPP_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=IK_LLAMA_LIB_PROFILE");
 
     // ---- bindgen (both modes) ----
     generate_bindings(&src, &out_dir, want_common);
@@ -113,6 +116,13 @@ fn main() {
         link_prebuilt(&lib_dir, want_common, want_cuda);
         format!("prebuilt:{}", lib_dir.display())
     } else {
+        // The C++ side is built optimized regardless of the Cargo profile: left to
+        // itself, cmake-rs mirrors the Cargo profile (`cargo build` -> Debug), which
+        // means ggml compiled with no optimization at all — measured ~10x slower
+        // inference, silently. Override with IK_LLAMA_LIB_PROFILE (mirrors upstream
+        // llama-cpp-sys-2's LLAMA_LIB_PROFILE).
+        let lib_profile =
+            env::var("IK_LLAMA_LIB_PROFILE").unwrap_or_else(|_| "Release".to_string());
         let dst = cmake_build(
             &src,
             want_common,
@@ -122,9 +132,10 @@ fn main() {
             want_openmp,
             want_native,
             dynamic_link,
+            &lib_profile,
         );
         link_built(&dst, want_common, dynamic_link);
-        "cmake".to_string()
+        format!("cmake:{lib_profile}")
     };
 
     // ---- CUDA runtime libs ----
@@ -352,8 +363,21 @@ fn cmake_build(
     want_openmp: bool,
     want_native: bool,
     dynamic_link: bool,
+    profile: &str,
 ) -> PathBuf {
     let mut cfg = cmake::Config::new(src);
+    cfg.profile(profile);
+    // MSVC: cmake-rs turns optimization off for a Rust debug build even when a
+    // Release CMake profile was asked for (rust-lang/cmake-rs#240), so reinject
+    // the flags a Release build is expected to have. Mirrors llama-cpp-sys-2.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+        && matches!(profile, "Release" | "RelWithDebInfo" | "MinSizeRel")
+    {
+        for flag in ["/O2", "/DNDEBUG", "/Ob2"] {
+            cfg.cflag(flag);
+            cfg.cxxflag(flag);
+        }
+    }
     cfg.define("GGML_MAX_CONTEXTS", "2048") // load >64-shard split sets / large merges
         .define("LLAMA_CURL", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")

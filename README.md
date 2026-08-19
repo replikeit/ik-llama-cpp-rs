@@ -14,6 +14,20 @@ repacks, BitNet, …) or its Multi-Token-Prediction (NextN) path. Production cod
 > ik and stock llama.cpp export the same `llama_*`/`ggml_*` symbols and have incompatible ggml
 > ABIs — **never link both into one process** (feature-gate one runtime per binary).
 
+## Logs
+
+The C side otherwise writes to stderr unconditionally (~330 lines per model load, release builds
+included). Redirect it into `tracing` before touching the backend:
+
+```rust
+ik_llama_cpp_2::send_logs_to_tracing(ik_llama_cpp_2::LogOptions::default());
+let backend = ik_llama_cpp_2::LlamaBackend::init()?;
+```
+
+ik's vendored ggml predates upstream's `ggml_log_set`, so `llama_log_set` is the whole hook: it
+covers llama.cpp plus the active backend's logger (CUDA / Metal), but not core `ggml.c`'s own
+`fprintf(stderr, …)` diagnostics.
+
 ## Build
 
 Two modes (Linux CPU + CUDA supported in v1):
@@ -33,6 +47,11 @@ cargo build -p ik-llama-cpp-2                    # CPU
 CUDACXX=/opt/cuda/bin/nvcc CUDAARCHS=89 PATH=/opt/cuda/bin:$PATH \
   cargo build -p ik-llama-cpp-2 --features cuda  # CUDA (NCCL disabled; single-GPU)
 ```
+
+The C++ side is always built with an optimized CMake profile (`Release`), *independently* of the
+Cargo profile — a `cargo build`/`cargo test` in dev would otherwise get an unoptimized ggml (~10x
+slower inference). Set `IK_LLAMA_LIB_PROFILE=Debug` (or `RelWithDebInfo`) to override. The resolved
+profile is echoed in the build's diagnostic line: `... backends=cpu+common (cmake:Release)`.
 
 ### Features / backends
 Drivers: `cuda`, `vulkan`, `metal` (Apple/macOS; no-op off-macOS), CPU (default). Plus `openmp`,
