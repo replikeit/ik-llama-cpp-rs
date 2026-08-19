@@ -15,7 +15,13 @@ are required. A prebuilt library can be linked instead via `IK_LLAMA_CPP_LIB_DIR
 for headers).
 
 Features: `cuda`, `vulkan`, `openmp`, `native`, `common` (ik `common/` + the MTP/json-schema glue),
-`mtmd` (libmtmd). Default = CPU core.
+`mtmd` (libmtmd). Default = CPU core, with OpenMP on (off on macOS; `IK_LLAMA_OPENMP=0` disables).
+
+The default x86 ISA baseline is deliberately conservative (AVX2/FMA/F16C — **no AVX-VNNI**, so ik's
+iqk int8 kernels take their generic path). Opt in per-ISA with `avx_vnni`, `avx512`, `avx512_vbmi`,
+`avx512_vnni`, `avx512_bf16` — chosen for the oldest machine the artifact will run on, since a
+missing ISA means SIGILL. `native` is host-only and not portable. See the
+[workspace README](https://github.com/replikeit/ik-llama-cpp-rs#cpu-isa-baseline-read-this-before-building-for-distribution).
 
 ## License
 

@@ -21,6 +21,61 @@ fn feat(name: &str) -> bool {
     env::var(format!("CARGO_FEATURE_{name}")).is_ok()
 }
 
+/// Granular x86 ISA opt-ins: `(cargo feature, ggml CMake option)`.
+///
+/// These are the instruction sets ggml leaves **OFF** by default
+/// (`ggml/CMakeLists.txt`) — AVX/AVX2/FMA/F16C are already ON whenever
+/// `GGML_NATIVE` is off (`INS_ENB`), so they need no feature here.
+///
+/// This is the portable alternative to `native`: `GGML_NATIVE=ON` compiles with
+/// `-march=native` (plus `CMAKE_CUDA_ARCHITECTURES=native`), i.e. host-specific
+/// code that SIGILLs on any machine older than the builder. These let the
+/// builder pick an explicit ISA baseline for the oldest *target* machine instead.
+///
+/// `avx_vnni` matters for ik in particular: `ggml/src/iqk/iqk_config.h` only
+/// defines `HAVE_VNNI256` and the `_mm256_dpbusd_avx_epi32` int8 dot-product
+/// macros the iqk kernels use under `__AVXVNNI__` (or AVX512-VNNI+VL). Without
+/// it the iqk kernels take the generic AVX2 path.
+const ISA_OPT_INS: &[(&str, &str)] = &[
+    ("AVX_VNNI", "GGML_AVXVNNI"),
+    ("AVX512", "GGML_AVX512"),
+    ("AVX512_VBMI", "GGML_AVX512_VBMI"),
+    ("AVX512_VNNI", "GGML_AVX512_VNNI"),
+    ("AVX512_BF16", "GGML_AVX512_BF16"),
+];
+
+/// The `ISA_OPT_INS` entries whose cargo feature is enabled.
+fn isa_opt_ins() -> Vec<(&'static str, &'static str)> {
+    ISA_OPT_INS
+        .iter()
+        .copied()
+        .filter(|(feature, _)| feat(feature))
+        .collect()
+}
+
+/// Resolve `GGML_OPENMP` (and the matching `-lgomp`).
+///
+/// **ON by default.** ggml's own default is ON and mainline llama-cpp-sys-2
+/// leaves it alone, so mainline builds with OpenMP while this crate used to pin
+/// it OFF whenever the `openmp` feature was absent — a slower default *and* an
+/// unequal comparison against mainline.
+///
+/// macOS is the exception and stays OFF by default: AppleClang ships no OpenMP
+/// runtime and `link_system()` links none there, so a `find_package(OpenMP)` hit
+/// on a separately-installed libomp would leave the final executable link with
+/// undefined `___kmpc_*`. The `openmp` feature still forces it on for anyone who
+/// wires up libomp themselves.
+///
+/// `IK_LLAMA_OPENMP=0` (also `off`/`false`) is the off-switch: cargo features are
+/// additive, so a default-on feature cannot be turned off by one.
+fn openmp_enabled() -> bool {
+    match env::var("IK_LLAMA_OPENMP").as_deref() {
+        Ok("0") | Ok("off") | Ok("OFF") | Ok("false") => false,
+        Ok(_) => true,
+        Err(_) => feat("OPENMP") || !cfg!(target_os = "macos"),
+    }
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -38,8 +93,9 @@ fn main() {
     let want_cuda = feat("CUDA");
     let want_vulkan = feat("VULKAN");
     let want_metal = feat("METAL") && cfg!(target_os = "macos");
-    let want_openmp = feat("OPENMP");
+    let want_openmp = openmp_enabled();
     let want_native = feat("NATIVE");
+    let isa = isa_opt_ins();
     let dynamic_link = feat("DYNAMIC_LINK");
     let static_stdcxx = feat("STATIC_STDCXX");
 
@@ -68,6 +124,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=IK_LLAMA_CPP_SRC");
     println!("cargo:rerun-if-env-changed=IK_LLAMA_CPP_LIB_DIR");
     println!("cargo:rerun-if-env-changed=IK_LLAMA_LIB_PROFILE");
+    println!("cargo:rerun-if-env-changed=IK_LLAMA_OPENMP");
 
     // ---- bindgen (both modes) ----
     generate_bindings(&src, &out_dir, want_common);
@@ -113,6 +170,15 @@ fn main() {
 
     // ---- native libs: prebuilt fast-path OR CMake build ----
     let backend = if let Some(lib_dir) = env::var("IK_LLAMA_CPP_LIB_DIR").ok().map(PathBuf::from) {
+        // No CMake runs on this path: the ISA baseline (and whether ggml was
+        // compiled with OpenMP at all) is baked into whatever built those libs.
+        // Our ISA features cannot influence it — say so instead of implying they did.
+        if !isa.is_empty() {
+            println!(
+                "cargo:warning=ik-llama-cpp-sys: IK_LLAMA_CPP_LIB_DIR set — ISA features ({}) are IGNORED; the prebuilt libs' ISA baseline is whatever built them",
+                isa_label(&isa)
+            );
+        }
         link_prebuilt(&lib_dir, want_common, want_cuda);
         format!("prebuilt:{}", lib_dir.display())
     } else {
@@ -131,6 +197,7 @@ fn main() {
             want_metal,
             want_openmp,
             want_native,
+            &isa,
             dynamic_link,
             &lib_profile,
         );
@@ -170,6 +237,8 @@ fn main() {
         want_vulkan,
         want_metal,
         want_openmp,
+        want_native,
+        &isa,
         want_common,
         &backend,
     );
@@ -362,6 +431,7 @@ fn cmake_build(
     want_metal: bool,
     want_openmp: bool,
     want_native: bool,
+    isa: &[(&str, &str)],
     dynamic_link: bool,
     profile: &str,
 ) -> PathBuf {
@@ -386,6 +456,12 @@ fn cmake_build(
         .define("BUILD_SHARED_LIBS", if dynamic_link { "ON" } else { "OFF" })
         .define("GGML_NATIVE", if want_native { "ON" } else { "OFF" })
         .define("GGML_OPENMP", if want_openmp { "ON" } else { "OFF" });
+    // Granular ISA opt-ins (see ISA_OPT_INS). Only the enabled ones are passed —
+    // ggml already defaults them OFF, so leaving the rest unset keeps the
+    // CMakeCache readable.
+    for (_, cmake_opt) in isa {
+        cfg.define(cmake_opt, "ON");
+    }
     // NOTE: ik always builds `common` (target `common` -> libcommon.a); there is
     // no LLAMA_BUILD_COMMON flag ([M2]).
     if want_cuda {
@@ -618,7 +694,11 @@ fn link_metal() {
 fn link_system(static_stdcxx: bool, want_openmp: bool) {
     // macOS: the C++ stdlib is libc++ (libstdc++ was removed), and m/pthread/dl
     // all live in libSystem (already linked), so `-lstdc++`/`-ldl`/`-lgomp` would
-    // fail. OpenMP on macOS is libomp, not gomp — not wired here.
+    // fail. OpenMP on macOS is libomp, not gomp — not wired here, which is why
+    // `openmp_enabled()` defaults OFF on macOS: a static ggml compiled against
+    // libomp would leave undefined `___kmpc_*` at the final executable link.
+    // Forcing the `openmp` feature on macOS therefore also means supplying the
+    // runtime yourself (e.g. `RUSTFLAGS="-L<libomp>/lib -lomp"`).
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=dylib=c++");
         return;
@@ -630,11 +710,25 @@ fn link_system(static_stdcxx: bool, want_openmp: bool) {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
     if want_openmp {
-        println!("cargo:rustc-link-lib=dylib=gomp");
+        // `static-openmp` needs libgomp.a (gcc's `libgomp-devel`-style package).
+        let kind = if feat("STATIC_OPENMP") {
+            "static"
+        } else {
+            "dylib"
+        };
+        println!("cargo:rustc-link-lib={kind}=gomp");
     }
     println!("cargo:rustc-link-lib=dylib=m");
     println!("cargo:rustc-link-lib=dylib=pthread");
     println!("cargo:rustc-link-lib=dylib=dl");
+}
+
+/// Human-readable ISA baseline for the diagnostic line, e.g. `avx_vnni+avx512`.
+fn isa_label(isa: &[(&str, &str)]) -> String {
+    isa.iter()
+        .map(|(feature, _)| feature.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -645,6 +739,8 @@ fn write_manifest(
     vulkan: bool,
     metal: bool,
     openmp: bool,
+    native: bool,
+    isa: &[(&str, &str)],
     common: bool,
     backend: &str,
 ) {
@@ -666,22 +762,36 @@ fn write_manifest(
     if metal {
         backends.push("metal");
     }
-    if openmp {
-        backends.push("openmp");
-    }
     if common {
         backends.push("common");
     }
+    // ISA baseline, spelled out: `native` (host-tuned, non-portable), the
+    // explicit opt-ins, or `baseline` (ggml's AVX2+FMA+F16C on x86, no VNNI).
+    // This is in the diagnostic line because the *absence* of it is how a build
+    // silently shipped GGML_AVXVNNI=OFF on a VNNI-capable CPU.
+    let isa_state = if backend.starts_with("prebuilt") {
+        // Nothing we set applies: the libs were compiled elsewhere.
+        "unknown(prebuilt)".to_string()
+    } else if native {
+        "native".to_string()
+    } else if isa.is_empty() {
+        "baseline".to_string()
+    } else {
+        isa_label(isa)
+    };
+    let openmp_state = if openmp { "on" } else { "off" };
     let manifest = format!(
-        "ik_sha={sha}\ntarget={target}\nGGML_MAX_CONTEXTS=2048\nbackends={}\nlink_backend={backend}\n",
+        "ik_sha={sha}\ntarget={target}\nGGML_MAX_CONTEXTS=2048\nbackends={}\nopenmp={openmp_state}\nisa={isa_state}\nlink_backend={backend}\n",
         backends.join("+")
     );
     let _ = std::fs::write(out_dir.join("ik-build.txt"), &manifest);
     println!(
-        "cargo:warning=ik-llama-cpp-sys: ik={} target={} backends={} ({})",
+        "cargo:warning=ik-llama-cpp-sys: ik={} target={} backends={} openmp={} isa={} ({})",
         &sha[..sha.len().min(8)],
         target,
         backends.join("+"),
+        openmp_state,
+        isa_state,
         backend
     );
 }
