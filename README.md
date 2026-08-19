@@ -34,6 +34,11 @@ CUDACXX=/opt/cuda/bin/nvcc CUDAARCHS=89 PATH=/opt/cuda/bin:$PATH \
   cargo build -p ik-llama-cpp-2 --features cuda  # CUDA (NCCL disabled; single-GPU)
 ```
 
+The C++ side is always built with an optimized CMake profile (`Release`), *independently* of the
+Cargo profile — a `cargo build`/`cargo test` in dev would otherwise get an unoptimized ggml (~10x
+slower inference). Set `IK_LLAMA_LIB_PROFILE=Debug` (or `RelWithDebInfo`) to override. The resolved
+profile is echoed in the build's diagnostic line: `... backends=cpu+common (cmake:Release)`.
+
 ### Features / backends
 Drivers: `cuda`, `vulkan`, `metal` (Apple/macOS; no-op off-macOS), CPU (default). Plus `openmp`,
 `native` (host-CPU tuning), `static-stdcxx`, `dynamic-link`, and `common` (builds ik `common/` + the
