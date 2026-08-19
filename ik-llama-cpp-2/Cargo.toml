@@ -36,12 +36,20 @@ cuda-no-vmm = ["cuda", "ik-llama-cpp-sys/cuda-no-vmm"]
 vulkan = ["ik-llama-cpp-sys/vulkan"]
 # Apple Metal backend (macOS/aarch64).
 metal = ["ik-llama-cpp-sys/metal"]
+# OpenMP is on by default (off only on macOS); this forces it, `IK_LLAMA_OPENMP=0`
+# disables it. See `openmp_enabled()` in ik-llama-cpp-sys/build.rs.
 openmp = ["ik-llama-cpp-sys/openmp"]
 static-openmp = ["ik-llama-cpp-sys/static-openmp"]
 static-stdcxx = ["ik-llama-cpp-sys/static-stdcxx"]
 shared-stdcxx = ["ik-llama-cpp-sys/shared-stdcxx"]
 dynamic-link = ["ik-llama-cpp-sys/dynamic-link"]
 native = ["ik-llama-cpp-sys/native"]
+# Granular x86 ISA opt-ins — pick for the oldest target machine, not the builder.
+avx_vnni = ["ik-llama-cpp-sys/avx_vnni"]
+avx512 = ["ik-llama-cpp-sys/avx512"]
+avx512_vbmi = ["ik-llama-cpp-sys/avx512_vbmi"]
+avx512_vnni = ["ik-llama-cpp-sys/avx512_vnni"]
+avx512_bf16 = ["ik-llama-cpp-sys/avx512_bf16"]
 # Enables model-backed integration tests gated behind IK_TEST_MODEL env.
 _smoke = []
 

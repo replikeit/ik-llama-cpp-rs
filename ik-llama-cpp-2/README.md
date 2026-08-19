@@ -33,7 +33,13 @@ ik-llama-cpp-2 = "0.1"
 ### Features
 
 `cuda`, `vulkan`, `metal` (Apple/macOS), `openmp`, `native` (host-CPU tuning), `common` (ik `common/` — enables the MTP
-speculative driver + `json_schema_to_grammar`), `mtmd` (multimodal). Default = CPU core.
+speculative driver + `json_schema_to_grammar`), `mtmd` (multimodal). Default = CPU core, OpenMP on
+(off on macOS; `IK_LLAMA_OPENMP=0` disables).
+
+CPU ISA opt-ins — `avx_vnni`, `avx512`, `avx512_vbmi`, `avx512_vnni`, `avx512_bf16` — are the portable
+alternative to `native`. The default baseline is AVX2/FMA/F16C only, which leaves ik's iqk int8
+kernels without their VNNI path; pick ISAs for the oldest target machine (a missing one = SIGILL).
+See the [workspace README](https://github.com/replikeit/ik-llama-cpp-rs#cpu-isa-baseline-read-this-before-building-for-distribution).
 
 ## Example
 

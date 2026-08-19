@@ -56,13 +56,59 @@ CUDACXX=/opt/cuda/bin/nvcc CUDAARCHS=89 PATH=/opt/cuda/bin:$PATH \
 The C++ side is always built with an optimized CMake profile (`Release`), *independently* of the
 Cargo profile — a `cargo build`/`cargo test` in dev would otherwise get an unoptimized ggml (~10x
 slower inference). Set `IK_LLAMA_LIB_PROFILE=Debug` (or `RelWithDebInfo`) to override. The resolved
-profile is echoed in the build's diagnostic line: `... backends=cpu+common (cmake:Release)`.
+profile is echoed in the build's diagnostic line: `... backends=cpu+common openmp=on isa=baseline
+(cmake:Release)`.
 
 ### Features / backends
 Drivers: `cuda`, `vulkan`, `metal` (Apple/macOS; no-op off-macOS), CPU (default). Plus `openmp`,
-`native` (host-CPU tuning), `static-stdcxx`, `dynamic-link`, and `common` (builds ik `common/` + the
-MTP glue). Prebuilt sharing (ik's equivalent of a "system ggml") is the `IK_LLAMA_CPP_LIB_DIR` link
-path — ik has no `LLAMA_USE_SYSTEM_GGML` since its ggml carries the SOTA-quant kernels.
+`native` (host-CPU tuning), the ISA opt-ins below, `static-stdcxx`, `dynamic-link`, and `common`
+(builds ik `common/` + the MTP glue). Prebuilt sharing (ik's equivalent of a "system ggml") is the
+`IK_LLAMA_CPP_LIB_DIR` link path — ik has no `LLAMA_USE_SYSTEM_GGML` since its ggml carries the
+SOTA-quant kernels.
+
+**OpenMP is on by default** (`GGML_OPENMP=ON`, matching ggml's own default and mainline
+llama-cpp-sys-2) on every platform except macOS, where no OpenMP runtime is linked. Turn it off with
+`IK_LLAMA_OPENMP=0` — cargo features are additive, so a default-on feature can't be subtracted by
+one; the `openmp` feature *forces* it on (including macOS, where you must then supply libomp
+yourself).
+
+### CPU ISA baseline (read this before building for distribution)
+**The default build is deliberately conservative and leaves performance on the table.** With
+`GGML_NATIVE=OFF` ggml enables only AVX/AVX2/FMA/F16C on x86 — everything newer is off, including
+AVX-VNNI. That matters more for ik than for mainline: `ggml/src/iqk/iqk_config.h` only defines
+`HAVE_VNNI256` and the `_mm256_dpbusd_avx_epi32` int8 dot-product macros under `__AVXVNNI__` (or
+AVX512-VNNI+VL), so without it the iqk kernels run their generic AVX2 path.
+
+`native` is *not* the fix for a distributed artifact: it compiles with `-march=native` (and
+`CMAKE_CUDA_ARCHITECTURES=native`), which SIGILLs on any machine older than the builder. Instead pick
+the ISA baseline explicitly, for the **oldest machine the artifact will run on**:
+
+| feature | ggml option | typical baseline |
+|---|---|---|
+| `avx_vnni`    | `GGML_AVXVNNI`     | Alder/Raptor Lake and newer (also Zen 5); AVX2-only CPUs will SIGILL |
+| `avx512`      | `GGML_AVX512`      | `-mavx512f -mavx512bw` |
+| `avx512_vbmi` | `GGML_AVX512_VBMI` | Ice Lake+ / Zen 4+ |
+| `avx512_vnni` | `GGML_AVX512_VNNI` | Ice Lake+ / Zen 4+ |
+| `avx512_bf16` | `GGML_AVX512_BF16` | Cooper Lake+ / Zen 4+ |
+
+```bash
+cargo build -p ik-llama-cpp-2 --features common,avx_vnni     # AVX2+VNNI baseline (Alder Lake+)
+```
+
+Caveats:
+* ik's `HAVE_FANCY_SIMD` (its AVX512 iqk path) also needs `AVX512VL`/`AVX512DQ`, which ggml's
+  `GGML_AVX512*` options do not add — on such CPUs pass `-mavx512vl -mavx512dq` via
+  `CFLAGS`/`CXXFLAGS`, or use `native` for a host-only build. *(Untested — no AVX512 hardware here.)*
+* On the `IK_LLAMA_CPP_LIB_DIR` prebuilt path no CMake runs, so these features are **ignored** (the
+  build warns) and the diagnostic line reports `isa=unknown(prebuilt)` — the baseline is whatever
+  built those libraries. OpenMP-on there only means `-lgomp` is added to the link, which is inert if
+  the prebuilt ggml has no OpenMP (and is what those libs need if it does).
+
+The resolved ISA and OpenMP state are echoed in the build's diagnostic line so a silently
+conservative build is visible:
+```
+ik-llama-cpp-sys: ik=8337e4cd target=x86_64-unknown-linux-gnu backends=cpu+common openmp=on isa=avx_vnni (cmake:Release)
+```
 
 > **`GGML_MAX_CONTEXTS=2048`** is set for all CMake builds: ik allocates one `ggml_context` per GGUF
 > shard, so loading a split set of >64 shards fails at shard 65 with the default cap of 64. (Only

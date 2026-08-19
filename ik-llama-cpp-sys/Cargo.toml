@@ -86,6 +86,10 @@ cuda-no-vmm = ["cuda"]
 vulkan = []
 # Apple Metal backend (macOS/aarch64). No-op on non-macOS targets.
 metal = []
+# OpenMP is ON by default (matching ggml's own default and mainline
+# llama-cpp-sys-2) except on macOS, where no OpenMP runtime is linked — see
+# `openmp_enabled()` in build.rs. This feature forces it on (incl. macOS);
+# `IK_LLAMA_OPENMP=0` is the off-switch (cargo features can't subtract).
 openmp = []
 static-openmp = ["openmp"]
 static-stdcxx = []
@@ -93,5 +97,17 @@ shared-stdcxx = []
 dynamic-link = []
 # Build with GGML_NATIVE=ON (host-CPU tuning). Off by default for portable artifacts.
 native = []
+
+# --- Granular x86 ISA opt-ins (portable alternative to `native`) ---
+# Each maps 1:1 to the ggml CMake option of the same name (see ISA_OPT_INS in
+# build.rs); all are OFF in ggml by default, while AVX2/FMA/F16C are already on.
+# Pick these for the OLDEST machine the artifact will run on: the binary will
+# SIGILL on a CPU lacking the selected ISA. `avx_vnni` is the one that matters
+# most for ik — the iqk int8 kernels need `__AVXVNNI__` for their VNNI path.
+avx_vnni = []
+avx512 = []
+avx512_vbmi = []
+avx512_vnni = []
+avx512_bf16 = []
 # NOTE: there is no `system-ggml` feature — ik has no LLAMA_USE_SYSTEM_GGML / ggml-config.cmake.
 # Linking a prebuilt ik is done via the `IK_LLAMA_CPP_LIB_DIR` env contract in build.rs.
