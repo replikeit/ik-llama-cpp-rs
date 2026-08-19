@@ -1,0 +1,10 @@
+# Serialize test execution across this workspace.
+#
+# Every model-backed test takes `LlamaBackend::init()`, which is a process-wide
+# singleton that *errors* (`BackendAlreadyInitialized`) instead of waiting — so
+# libtest's default thread-per-test makes any test binary holding more than one
+# such test fail on whichever test loses the race (grammar_smoke.rs has 5).
+#
+# Overridable per run: `cargo test -- --test-threads=N` wins over the env var.
+[env]
+RUST_TEST_THREADS = "1"

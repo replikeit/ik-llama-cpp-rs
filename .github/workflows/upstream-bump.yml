@@ -1,0 +1,170 @@
+# Weekly: move the vendored ik_llama.cpp submodule to `ikawrakow/main`, bump the
+# crates' patch version, and open a PR carrying the upstream commit list and a
+# build verdict.
+#
+# This can be fully automatic because the submodule tracks upstream directly —
+# there are no local C++ patches to replay. What it cannot promise is that ik's
+# C API still fits our glue: `wrapper_common.cpp` / `wrapper_grammar.cpp` call
+# into `common/` internals that upstream renames without ceremony (e.g.
+# `recurrent_ckpt_mode` -> `spec_ckpt_mode`, and `common_speculative_commit`
+# gaining a meaningful `bool` return). So the bump is *built* here and the PR
+# says plainly whether it compiles.
+#
+# Two deliberate design points:
+#
+#   * The build runs in THIS workflow rather than leaning on ci.yml, because
+#     GitHub does not trigger workflows for PRs opened with GITHUB_TOKEN — an
+#     `on: pull_request` job would never fire for this PR. Don't "deduplicate".
+#   * One bump in flight at a time: a fresh per-sha branch each run, never a
+#     force-push, and the run exits early while an `upstream-bump` PR is still
+#     open. That way a human fix pushed onto a bump PR can't be overwritten, and
+#     ignored bumps don't pile up as weekly duplicates.
+name: Upstream bump (ik_llama.cpp)
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  SUB: ik-llama-cpp-sys/ik_llama.cpp
+  LABEL: upstream-bump
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Measure drift against ikawrakow/main
+        id: drift
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+
+          # Idempotent, so `pr list --label` below can't fail on a missing label.
+          gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" --color 0E8A16 \
+            --description "Automated ik_llama.cpp submodule bump" 2>/dev/null || true
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            echo "PR #$open is still open — merge or close it before the next bump."
+            exit 0
+          fi
+
+          cd "$SUB"
+          # A shallow submodule clone has no merge base with upstream, which makes
+          # every rev-list below meaningless. Deepen before asking anything.
+          git fetch --unshallow origin 2>/dev/null || git fetch --quiet origin
+          git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+          old=$(git rev-parse HEAD)
+          new=$(git rev-parse origin/main)
+          if [ "$old" = "$new" ]; then
+            echo "In sync with ikawrakow/main ($old). Nothing to do."
+            exit 0
+          fi
+
+          {
+            echo "changed=true"
+            echo "old=$old"
+            echo "new=$new"
+            echo "branch=auto/ik-bump-${new:0:12}"
+            echo "n=$(git rev-list --count "$old".."$new")"
+          } >> "$GITHUB_OUTPUT"
+          git log --oneline --no-decorate "$old".."$new" | head -60 > "$RUNNER_TEMP/commits.txt"
+
+      - name: Move the submodule and bump the crate version
+        id: bump
+        if: steps.drift.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git -C "$SUB" checkout --quiet --detach "${{ steps.drift.outputs.new }}"
+          old_v=$(sed -n 's/^version = "\(.*\)"/\1/p' ik-llama-cpp-2/Cargo.toml | head -1)
+          new_v=$(echo "$old_v" | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
+          # Three occurrences, one literal: both crate versions plus the sys dep
+          # pin in the wrapper. The two crates are always released in lockstep.
+          sed -i "s/\"$old_v\"/\"$new_v\"/g" ik-llama-cpp-2/Cargo.toml ik-llama-cpp-sys/Cargo.toml
+          echo "new_v=$new_v" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.drift.outputs.changed == 'true'
+
+      - name: Install build deps
+        if: steps.drift.outputs.changed == 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config git
+
+      - name: Build + test against the new upstream
+        id: verify
+        if: steps.drift.outputs.changed == 'true'
+        run: |
+          # `_smoke` is only compile-checked: those tests need a GGUF fixture the
+          # runner has not got.
+          if { cargo build -p ik-llama-cpp-2 --features common \
+                && cargo test -p ik-llama-cpp-2 --features common \
+                && cargo test -p ik-llama-cpp-2 --features common,_smoke --no-run; } \
+                > "$RUNNER_TEMP/build.log" 2>&1; then
+            echo "verdict=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=broken" >> "$GITHUB_OUTPUT"
+          fi
+          tail -60 "$RUNNER_TEMP/build.log"
+
+      - name: Open the bump PR
+        if: steps.drift.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLD: ${{ steps.drift.outputs.old }}
+          NEW: ${{ steps.drift.outputs.new }}
+          N: ${{ steps.drift.outputs.n }}
+          BRANCH: ${{ steps.drift.outputs.branch }}
+          NEW_V: ${{ steps.bump.outputs.new_v }}
+          VERDICT: ${{ steps.verify.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -B "$BRANCH"
+          # Cargo.lock is gitignored (library crate) — do not add it, `git add` on an
+          # ignored path fails outright and would kill the step.
+          git add "$SUB" ik-llama-cpp-sys/Cargo.toml ik-llama-cpp-2/Cargo.toml
+          git commit -q -m "chore: bump ik_llama.cpp to ${NEW:0:12}, crates to $NEW_V"
+          git push -q origin "$BRANCH"
+
+          # Built from `echo` lines rather than one printf format string: the body
+          # needs both literal ``` fences (single-quoted echoes, unexpandable) and
+          # interpolated values (double-quoted, backticks backslash-escaped).
+          {
+            echo "Moves \`$SUB\` from \`${OLD:0:12}\` to \`${NEW:0:12}\` (**$N upstream commits**) and bumps both crates to \`$NEW_V\`."
+            echo
+            if [ "$VERDICT" = ok ]; then
+              echo "**Build + unit tests pass.** The model-backed \`_smoke\` tests are compile-checked only — the runner has no GGUF fixture, so run them locally (\`IK_TEST_MODEL\`, \`IK_MTP_MODEL\`) before releasing."
+            else
+              echo "**Build FAILS.** Upstream most likely moved a \`common/\` API the glue calls (\`wrapper_common.cpp\`, \`wrapper_grammar.cpp\`, or a bindgen symbol). Tail of the log:"
+              echo
+              echo '```'
+              tail -60 "$RUNNER_TEMP/build.log"
+              echo '```'
+            fi
+            echo
+            echo "Upstream commits (newest first, up to 60):"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/commits.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+
+          title="chore: bump ik_llama.cpp to ${NEW:0:12} + crates $NEW_V"
+          [ "$VERDICT" = ok ] || title="[build fails] $title"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            --label "$LABEL" --title "$title" --body-file "$RUNNER_TEMP/body.md"

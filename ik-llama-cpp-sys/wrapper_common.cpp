@@ -241,7 +241,7 @@ llama_rs_status ik_llama_rs_mtp_step(
             const bool ok = common_speculative_before_draft(
                 h->spec, h->model, h->ctx_tgt, h->smpl, h->sparams,
                 h->seq_id, h->n_past, sampled_before, (int) draft.size() + 1,
-                h->params.recurrent_ckpt_mode);
+                h->params.spec_ckpt_mode);
             if (!ok) {
                 draft.clear();
             }
@@ -282,9 +282,14 @@ llama_rs_status ik_llama_rs_mtp_step(
         if (!ids.empty()) {
             accepted_output_indices.assign(verify_indices.begin(), verify_indices.begin() + ids.size());
         }
-        common_speculative_commit(
-            h->spec, h->ctx_tgt, h->smpl, h->seq_id, sampled_before, ids,
-            (int) draft.size(), h->n_past + 1, accepted_output_indices);
+        // false = the checkpoint restore/commit failed, so the target KV and the
+        // companion's recurrent state are now inconsistent — generating on would
+        // be silently wrong. main.cpp:1040-1053 treats it as fatal; so do we.
+        if (!common_speculative_commit(
+                h->spec, h->ctx_tgt, h->smpl, h->seq_id, sampled_before, ids,
+                (int) draft.size(), h->n_past + 1, accepted_output_indices)) {
+            return LLAMA_RS_STATUS_EXCEPTION; // vbg frees the batch
+        }
         // vbg frees the verify batch at scope end (incl. exception paths)
 
         // emit: [sampled_before if not carried] + ids ; carry the bonus (ids.back())
@@ -349,7 +354,7 @@ llama_rs_status ik_llama_rs_mtp_draft(
             const bool ok = common_speculative_before_draft(
                 h->spec, h->model, h->ctx_tgt, h->smpl, h->sparams,
                 h->seq_id, h->n_past, id_last, (int) draft.size() + 1,
-                h->params.recurrent_ckpt_mode);
+                h->params.spec_ckpt_mode);
             if (!ok) {
                 draft.clear();
             }
@@ -404,9 +409,13 @@ llama_rs_status ik_llama_rs_mtp_commit(
         // Advances the MTP companion by the accepted count and rolls the target KV
         // back to `n_past + n_committed` (drops rejected drafts). Consumes the
         // already-sampled `ids`; performs no sampling itself.
-        common_speculative_commit(
-            h->spec, h->ctx_tgt, h->smpl, h->seq_id, id_last, ids,
-            (int) n_draft, h->n_past + 1, accepted_output_indices);
+        // See the mtp_step call site: false means the rollback left the target /
+        // companion state inconsistent, so don't advance n_past over it.
+        if (!common_speculative_commit(
+                h->spec, h->ctx_tgt, h->smpl, h->seq_id, id_last, ids,
+                (int) n_draft, h->n_past + 1, accepted_output_indices)) {
+            return LLAMA_RS_STATUS_EXCEPTION;
+        }
         h->n_past += (llama_pos) n_committed;
         return LLAMA_RS_STATUS_OK;
     } catch (...) {

@@ -9,7 +9,12 @@ repacks, BitNet, …) or its Multi-Token-Prediction (NextN) path. Production cod
 `use llama_cpp_2` → `use ik_llama_cpp_2`.
 
 - `ik-llama-cpp-sys` — low-level FFI (bindgen + CMake/prebuilt build). `links = "ik_llama"`.
-- `ik-llama-cpp-2` — safe wrapper. Submodule pinned at `ikawrakow/ik_llama.cpp @ 9d07d868`.
+- `ik-llama-cpp-2` — safe wrapper. Submodule pinned at `ikawrakow/ik_llama.cpp @ 8337e4cd`.
+
+The pin is moved by `.github/workflows/upstream-bump.yml`: weekly, it walks the submodule to
+`ikawrakow/main`, bumps both crates' patch version, builds, and opens one PR saying whether ik's C
+API still fits the glue. Merge it when you want the upstream changes; the model-backed `_smoke` tests
+are yours to run (the runner has no GGUF).
 
 > ik and stock llama.cpp export the same `llama_*`/`ggml_*` symbols and have incompatible ggml
 > ABIs — **never link both into one process** (feature-gate one runtime per binary).
